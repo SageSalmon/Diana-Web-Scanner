@@ -121,6 +121,59 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 - **Data:** SQLAlchemy + PostgreSQL
 - **Infra:** Terraform, ECS Fargate, Aurora Serverless
 
+## Autonomous Agent Team
+
+Diana is also a proof of concept in **agentic software development** — a team of AI agents that iteratively improve the scanner's detection capabilities without human intervention (beyond final merge approval).
+
+The agent team runs a continuous improvement loop: scan a target, measure detection coverage, identify gaps, implement a fix, validate the fix didn't break anything or introduce target-specific code, and record the results. Each agent's work is validated by a different agent — no agent marks its own homework.
+
+### The Loop
+
+```
+1. BASELINE         Validation Agent scans a target on AWS, records solve rate
+2. GAP ANALYSIS     Improvement Agent reads results, picks highest-impact generic fix
+3. IMPLEMENT        Improvement Agent writes code on a feature branch
+4. GENERALITY GATE  Generality Agent reviews diff — rejects target-specific code
+5. TEST AUTHORING   Test Author writes tests, Test Critic reviews them
+6. AWS VALIDATION   Validation + Test Runner + Benchmark run in parallel on ECS
+7. REVIEW           Review Agent synthesizes all results, recommends merge or reject
+8. CHRONICLE        Review Agent records metrics, narrative, and next steps
+```
+
+### The Agents
+
+| Agent | Runs | Responsibility |
+|-------|------|----------------|
+| **Validation** | AWS (ECS) | Run Diana against test targets, compare results to known vulnerabilities, produce gap analysis |
+| **Improvement** | Local | Read gap analysis, select highest-impact generic improvement, implement on feature branch |
+| **Generality** | Local | Review every changed line — reject code that only works against one target or tech stack |
+| **Test Author** | Local | Write unit tests for new/changed code with synthetic fixtures (no live targets) |
+| **Test Critic** | Local | Review tests for correctness, completeness, and independence — reject vacuous tests |
+| **Test Runner** | AWS (ECS) | Execute pytest suite on the branch |
+| **Benchmark** | AWS (ECS) | Timed scan measuring duration, token usage, and HTTP request count |
+| **Review** | Local | Final quality gate — synthesize all agent verdicts, write chronicle entry, recommend merge/reject |
+| **Orchestrator** | Local | Run the full loop, enforce gate ordering, detect stalls |
+
+### Cross-Validation
+
+Every agent that produces output has a different agent that validates it:
+
+| Producer | Validator |
+|----------|-----------|
+| Improvement Agent | Generality, Test Critic, Validation, Benchmark |
+| Test Author | Test Critic |
+| Validation Agent | Review Agent |
+| Benchmark Agent | Review Agent |
+| Review Agent | Human (the only output you need to check) |
+
+### AWS Infrastructure
+
+Agent tasks run on ECS Fargate with isolated Juice Shop sidecar containers. CodeBuild builds a Diana image from the feature branch, pushes to ECR, and ECS runs the scan. Results land in S3 as structured JSON, fetched by local agents for analysis.
+
+The agent skills are defined in `.claude/skills/agent-*/SKILL.md` and invocable as Claude Code slash commands (`/agent-validation`, `/agent-orchestrator`, etc.).
+
+See [docs/AGENT_TEAM_PLAN.md](docs/AGENT_TEAM_PLAN.md) for the full design and [docs/CHRONICLE.md](docs/CHRONICLE.md) for iteration history.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — system design and component diagrams
@@ -128,6 +181,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 - [API Reference](docs/API.md) — REST API documentation
 - [Agent Team Plan](docs/AGENT_TEAM_PLAN.md) — autonomous improvement agent design
 - [Chronicle](docs/CHRONICLE.md) — iteration history and metrics
+- [RAG Optimization](docs/FUTURE_RAG_OPTIMIZATION.md) — future context optimization design
 
 ## Ethical Use
 
