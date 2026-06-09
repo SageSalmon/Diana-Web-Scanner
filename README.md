@@ -1,5 +1,7 @@
 # Diana — AI-Enabled Web Vulnerability Scanner
 
+> **Authorized security testing only.** Diana is a penetration testing tool designed for use with explicit written permission from the target system owner. Unauthorized scanning is illegal and unethical. The scanner enforces scope boundaries, logs all requests, and provides a full audit trail — but the responsibility for authorized use lies with the operator. See [Ethical Use](#ethical-use) for details.
+
 Diana is an AI-powered web application vulnerability scanner that combines traditional scanning techniques with LLM-driven intelligence. Built on Amazon Bedrock, it uses AI agents to autonomously discover, analyze, and validate security vulnerabilities with significantly reduced false positives.
 
 ## Why Diana?
