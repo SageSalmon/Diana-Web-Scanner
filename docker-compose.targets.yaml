@@ -1,0 +1,51 @@
+# Test range — intentionally vulnerable apps for scanner validation.
+# These containers are on an INTERNAL network with no host port bindings.
+# Only the diana-scanner container can reach them.
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    networks:
+      - diana-targets
+    # NO ports: — not exposed to host
+
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    networks:
+      - diana-targets
+    environment:
+      - MYSQL_DATABASE=dvwa
+    # NO ports: — not exposed to host
+
+  webgoat:
+    image: webgoat/webgoat:latest
+    networks:
+      - diana-targets
+    environment:
+      - WEBGOAT_PORT=8080
+    # NO ports: — not exposed to host
+
+  diana-scanner:
+    build: .
+    command: serve --port 8000
+    ports:
+      - "8000:8000"  # API exposed to host for interaction
+    networks:
+      - diana-targets
+    volumes:
+      - ./engagements:/app/engagements
+      - ./reports:/app/reports
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+    depends_on:
+      - juice-shop
+      - dvwa
+      - webgoat
+
+networks:
+  diana-targets:
+    driver: bridge
+    internal: true  # No external connectivity — isolated test range

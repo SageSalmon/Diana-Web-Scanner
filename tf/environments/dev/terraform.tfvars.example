@@ -1,0 +1,28 @@
+# Copy to terraform.tfvars and fill in values
+# DO NOT commit terraform.tfvars — it contains secrets
+
+aws_region = "us-east-1"
+project    = "diana"
+
+# Your domain and Route 53 hosted zone
+domain_name    = "diana.example.com"
+hosted_zone_id = "YOUR_HOSTED_ZONE_ID"
+
+# Restrict ALB access to your IP
+allowed_cidr_blocks = ["1.2.3.4/32"]
+
+# Database credentials
+db_username = "diana_admin"
+db_password = "CHANGE_ME_TO_SOMETHING_SECURE"
+
+# API key for Diana REST API
+api_key = "CHANGE_ME_TO_SOMETHING_SECURE"
+
+# AI model
+bedrock_model_id = "anthropic.claude-sonnet-4-6"
+
+# GitHub repo URL (used by CodeBuild for agent team)
+github_repo_url = "https://github.com/YOUR_ORG/diana-scanner.git"
+
+# Test targets
+enable_test_targets = true

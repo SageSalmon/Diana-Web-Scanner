@@ -1,0 +1,20 @@
+services:
+  diana-api:
+    build: .
+    command: serve --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./engagements:/app/engagements
+      - ./reports:/app/reports
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+    networks:
+      - diana-internal
+
+networks:
+  diana-internal:
+    driver: bridge

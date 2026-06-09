@@ -1,0 +1,18 @@
+{
+  "_comment": "Bedrock pricing per 1M tokens (USD). Update when rates change.",
+  "_updated": "2026-06-05",
+  "models": {
+    "deepseek.v3.2": {
+      "input_per_1m": 0.27,
+      "output_per_1m": 1.10
+    },
+    "anthropic.claude-sonnet-4-6": {
+      "input_per_1m": 3.00,
+      "output_per_1m": 15.00
+    },
+    "anthropic.claude-haiku-4-5-20251001": {
+      "input_per_1m": 0.80,
+      "output_per_1m": 4.00
+    }
+  }
+}

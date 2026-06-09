@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Diana runtime
+reports/
+*.jsonl
+
+# Environment
+.env
+.env.local
+
+# Claude Code
+**/.claude/
+!**/.claude/commands/
+!**/.claude/commands/*.md
+!**/.claude/skills/
+!**/.claude/skills/**
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Terraform
+tf/**/.terraform/
+tf/**/.terraform.lock.hcl
+tf/**/*.tfstate
+tf/**/*.tfstate.backup
+tf/**/*.tfplan
+tf/**/terraform.tfvars
+tf/**/backend.hcl
+tf/**/crash.log
+agent-results/

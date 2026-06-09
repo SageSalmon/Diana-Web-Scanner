@@ -1,0 +1,8 @@
+# Copy to backend.hcl and fill in your values
+# DO NOT commit backend.hcl — it contains your AWS account details
+
+bucket         = "diana-terraform-state-YOUR_ACCOUNT_ID"
+key            = "dev/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "diana-terraform-locks"
+encrypt        = true

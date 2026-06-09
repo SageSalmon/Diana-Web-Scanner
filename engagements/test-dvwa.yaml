@@ -1,0 +1,26 @@
+engagement:
+  id: "TEST-DVWA-001"
+  client: "Internal Testing"
+  start_date: "2026-01-01T00:00:00Z"
+  end_date: "2099-12-31T23:59:59Z"
+  tester: "diana-ci"
+
+scope:
+  targets:
+    - domain: "dvwa"
+      ports: [80]
+      paths:
+        include: ["/*"]
+        exclude: ["/setup.php"]
+      methods: [GET, POST]
+
+  deny_list: []
+
+restrictions:
+  rate_limit: 50
+  max_concurrent: 10
+  destructive_payloads: false
+  max_crawl_depth: 5
+
+notifications:
+  on_scope_violation: "warn_and_block"

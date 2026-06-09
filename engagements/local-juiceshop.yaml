@@ -1,0 +1,33 @@
+engagement:
+  id: "LOCAL-JUICESHOP-001"
+  client: "Local Testing"
+  start_date: "2026-01-01T00:00:00Z"
+  end_date: "2099-12-31T23:59:59Z"
+  tester: "diana-scanner"
+
+scope:
+  targets:
+    - domain: "localhost"
+      ports: [3000]
+      paths:
+        include: ["/*"]
+        exclude: []
+      methods: [GET, POST, PUT, DELETE]
+
+  deny_list: []
+
+# First = high-priv, second = low-priv (for IDOR comparison)
+# If only one provided, scanner registers its own low-priv user
+credentials:
+  - username: "admin@juice-sh.op"
+    password: "admin123"
+
+restrictions:
+  rate_limit: 50
+  max_concurrent: 10
+  destructive_payloads: false
+  max_crawl_depth: 3
+
+
+notifications:
+  on_scope_violation: "warn_and_block"
