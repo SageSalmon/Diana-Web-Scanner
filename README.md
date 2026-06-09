@@ -86,6 +86,22 @@ terraform apply
 
 See [terraform.tfvars.example](tf/environments/dev/terraform.tfvars.example) for all options.
 
+### Cost Warning
+
+Running Diana on AWS incurs real costs that can accumulate quickly. AI-enabled scans make many LLM calls through Bedrock, the agent team runs multiple scans per iteration on ECS Fargate, and infrastructure resources (Aurora, ElastiCache, NAT Gateway) have standing charges while deployed.
+
+**Strategies this project uses to manage costs:**
+
+- **DeepSeek V3.2 as the default model** — significantly cheaper per token than Claude on Bedrock, with acceptable scan quality
+- **Ollama for local development** — zero AWS cost for iterating on scanner logic before deploying
+- **Fargate for agent tasks** — pay-per-task, no idle compute. Tasks spin up, run, and terminate
+- **Generality gate before AWS spend** — the agent team catches bad code locally before launching any ECS tasks
+- **Per-module token tracking** — the `ModuleMetrics` table records LLM calls and token counts per scan per module, so you can identify which components consume the most
+- **Bedrock pricing config** — `scripts/bedrock-pricing.json` feeds cost estimates into the chronicle for per-iteration tracking
+- **Tear down when not in use** — `terraform destroy` removes all infrastructure. Redeploy with `terraform apply` when you're ready to work again
+
+Monitor your AWS billing dashboard closely, especially during early experimentation. Set up a billing alarm before your first deployment.
+
 ## Architecture
 
 ```mermaid
