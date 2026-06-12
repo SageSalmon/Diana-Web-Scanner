@@ -186,16 +186,40 @@ class ScanOrchestrator:
             )
             sitemap = await crawler.crawl(self.config.target)
 
-            # Phase 2b: SPA route discovery (JS extraction only — no Playwright)
-            # Playwright browser phases (crawl_routes, test_dom_xss) are disabled
-            # because Playwright's sync internals block the async event loop.
-            # TODO: Run Playwright in a subprocess or thread pool.
+            # Phase 2b: SPA route discovery + Playwright rendering
             self._spa_findings: list[Finding] = []
             spa = SPACrawler(self.http)
             try:
                 spa_routes = await spa.discover_routes(sitemap)
             except Exception:
                 spa_routes = []
+
+            # Playwright browser phases — run in thread pool to avoid
+            # blocking the async event loop (Playwright has sync internals)
+            if spa_routes:
+                import asyncio
+                print(f"\n  SPA routes discovered: {len(spa_routes)}")
+                for r in spa_routes[:15]:
+                    print(f"    /{r}")
+
+                try:
+                    # Crawl rendered SPA pages for forms and inputs
+                    spa_endpoints = await asyncio.to_thread(
+                        lambda: asyncio.run(spa.crawl_routes(self.config.target, spa_routes))
+                    )
+                    if spa_endpoints:
+                        print(f"  Playwright found {len(spa_endpoints)} rendered endpoints")
+                        sitemap.endpoints.extend(spa_endpoints)
+
+                    # Test DOM XSS with real browser execution
+                    dom_xss_findings = await asyncio.to_thread(
+                        lambda: asyncio.run(spa.test_dom_xss(self.config.target, spa_routes))
+                    )
+                    if dom_xss_findings:
+                        print(f"  Playwright found {len(dom_xss_findings)} DOM XSS findings")
+                        self._spa_findings.extend(dom_xss_findings)
+                except Exception as e:
+                    print(f"  Playwright SPA phases failed: {e}")
 
             result.sitemap = sitemap
 

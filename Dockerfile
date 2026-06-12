@@ -20,7 +20,8 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 RUN pip install --no-cache-dir .
 
-# Install Playwright browsers
+# Install Playwright browsers to a shared path accessible by all users
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN playwright install --with-deps chromium
 
 # Copy runtime configs, scripts, and tests
