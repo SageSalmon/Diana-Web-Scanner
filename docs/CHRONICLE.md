@@ -56,3 +56,33 @@ Next: try Access Control or Input Validation (less SPA-dependent), or enable
 Playwright rendering for XSS detection.
 
 ---
+
+## Iteration 3 — Enable Playwright SPA Crawling (2026-06-09) ✓ MERGED
+
+**Solve rate: 6.2% → 7.1% (+0.9%)**  |  Duration: 1708s → 1394s  |  Tests: 21
+**Cost: ~$1.00 (2 scans across old+new repo)**  |  Cumulative: ~$2.75
+
+First solve rate improvement. Enabled the previously disabled Playwright browser
+phases by running them in asyncio.to_thread(). The SPA crawler now discovers 49
+client-side routes, renders 15 with headless Chromium, and tests DOM XSS by
+injecting payloads into URL parameters and checking for alert dialog execution.
+
+Unlocked: **DOM XSS (1*)** — Playwright navigated to hash routes with XSS payloads
+and detected an alert dialog firing, confirming DOM-based cross-site scripting.
+Also fixed Playwright browser path (/opt/playwright) so the non-root diana user
+can access Chromium binaries.
+
+Scan duration decreased 18% despite adding browser rendering — likely due to
+Playwright discovering routes that helped the AI agents work more efficiently.
+
+This is the first complete iteration loop with a successful improvement:
+baseline → implement → generality pass → AWS validation → merge → chronicle.
+
+Next opportunities:
+- Access Control (0/12) — add to default module list, test auth level variations
+- Reflected XSS via rendered DOM — Playwright renders pages but we only test
+  hash-route injection; could also check if API response data is reflected
+  unsanitized in the rendered page
+- Input Validation fuzzing (0/14) — zero/empty/boundary values on API endpoints
+
+---
