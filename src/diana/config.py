@@ -29,6 +29,11 @@ class AuthConfig(BaseModel):
 class ScanModuleConfig(BaseModel):
     modules: list[str] = Field(default_factory=lambda: [
         "xss", "sqli", "ssrf", "headers", "info_disclosure", "auth",
+        # Access control (OWASP A01) runs last: it's AI-driven and slower, and
+        # depends on auth context established by earlier phases. The module was
+        # registered but never enabled by default, so authorization flaws (IDOR,
+        # method tampering, privilege escalation) went entirely untested.
+        "access_control",
     ])
 
 
