@@ -69,6 +69,15 @@ elif agent == 'benchmark':
     print(f\"  Input tokens: {tokens.get('total_input', 0):,}\")
     print(f\"  Output tokens: {tokens.get('total_output', 0):,}\")
     print(f\"  LLM calls: {tokens.get('total_calls', 0)}\")
+elif agent == 'tinyloop':
+    det = data.get('detection', {})
+    print(f\"  Modules: {', '.join(data.get('modules', []))}\")
+    print(f\"  Targeted solved: {det.get('target_solved', 0)}/{det.get('target_count', 0)}\")
+    print(f\"  Overall solved: {det.get('challenges_solved', 0)}/{det.get('challenges_total', 0)}\")
+    print(f\"  Duration: {data.get('performance', {}).get('scan_duration_seconds', 0)}s\")
+    for t in det.get('target_challenges', []):
+        mark = 'x' if t.get('solved') else ('.' if t.get('found') else '?')
+        print(f\"    [{mark}] {t.get('name')}\")
 " 2>/dev/null || echo "  (could not parse results)"
   echo ""
 done

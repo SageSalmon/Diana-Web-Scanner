@@ -178,49 +178,9 @@ class ScanOrchestrator:
                         f"Low-priv authenticated as {low_priv.username}",
                     )
 
-            # Phase 1-2: Crawl and map
+            # Phase 1-2: Crawl and map (or load a cached sitemap)
             result.status = ScanStatus.CRAWLING
-            crawler = Crawler(
-                self.http,
-                max_depth=self.enforcer.max_crawl_depth,
-            )
-            sitemap = await crawler.crawl(self.config.target)
-
-            # Phase 2b: SPA route discovery + Playwright rendering
-            self._spa_findings: list[Finding] = []
-            spa = SPACrawler(self.http)
-            try:
-                spa_routes = await spa.discover_routes(sitemap)
-            except Exception:
-                spa_routes = []
-
-            # Playwright browser phases — run in thread pool to avoid
-            # blocking the async event loop (Playwright has sync internals)
-            if spa_routes:
-                import asyncio
-                print(f"\n  SPA routes discovered: {len(spa_routes)}")
-                for r in spa_routes[:15]:
-                    print(f"    /{r}")
-
-                try:
-                    # Crawl rendered SPA pages for forms and inputs
-                    spa_endpoints = await asyncio.to_thread(
-                        lambda: asyncio.run(spa.crawl_routes(self.config.target, spa_routes))
-                    )
-                    if spa_endpoints:
-                        print(f"  Playwright found {len(spa_endpoints)} rendered endpoints")
-                        sitemap.endpoints.extend(spa_endpoints)
-
-                    # Test DOM XSS with real browser execution
-                    dom_xss_findings = await asyncio.to_thread(
-                        lambda: asyncio.run(spa.test_dom_xss(self.config.target, spa_routes))
-                    )
-                    if dom_xss_findings:
-                        print(f"  Playwright found {len(dom_xss_findings)} DOM XSS findings")
-                        self._spa_findings.extend(dom_xss_findings)
-                except Exception as e:
-                    print(f"  Playwright SPA phases failed: {e}")
-
+            sitemap = await self._obtain_sitemap()
             result.sitemap = sitemap
 
             # Store crawl results in database
@@ -350,6 +310,73 @@ class ScanOrchestrator:
             f"Scan {self.scan_id} completed — {len(result.findings)} findings",
         )
         return result
+
+    async def _obtain_sitemap(self) -> SiteMap:
+        """Crawl the target, or load a cached sitemap to skip the crawl.
+
+        If ``config.sitemap_cache`` names an existing file, the sitemap is
+        loaded from it and the crawl + Playwright phases are skipped — this is
+        what makes fast inner-loop iterations cheap when a change does not touch
+        the crawler. If the path is set but the file is absent, a normal crawl
+        runs and the fully-assembled sitemap (including SPA-rendered endpoints)
+        is written there for reuse. SPA-derived DOM XSS findings are only
+        produced on a live crawl; ``_spa_findings`` is always initialized.
+        """
+        self._spa_findings: list[Finding] = []
+        cache_path = Path(self.config.sitemap_cache) if self.config.sitemap_cache else None
+
+        if cache_path and cache_path.exists():
+            sitemap = SiteMap.model_validate_json(cache_path.read_text())
+            print(f"\n  Loaded cached sitemap from {cache_path} "
+                  f"({len(sitemap.endpoints)} endpoints) — skipping crawl")
+            return sitemap
+
+        crawler = Crawler(
+            self.http,
+            max_depth=self.enforcer.max_crawl_depth,
+        )
+        sitemap = await crawler.crawl(self.config.target)
+
+        # Phase 2b: SPA route discovery + Playwright rendering
+        spa = SPACrawler(self.http)
+        try:
+            spa_routes = await spa.discover_routes(sitemap)
+        except Exception:
+            spa_routes = []
+
+        # Playwright browser phases — run in thread pool to avoid
+        # blocking the async event loop (Playwright has sync internals)
+        if spa_routes:
+            print(f"\n  SPA routes discovered: {len(spa_routes)}")
+            for r in spa_routes[:15]:
+                print(f"    /{r}")
+
+            try:
+                # Crawl rendered SPA pages for forms and inputs
+                spa_endpoints = await asyncio.to_thread(
+                    lambda: asyncio.run(spa.crawl_routes(self.config.target, spa_routes))
+                )
+                if spa_endpoints:
+                    print(f"  Playwright found {len(spa_endpoints)} rendered endpoints")
+                    sitemap.endpoints.extend(spa_endpoints)
+
+                # Test DOM XSS with real browser execution
+                dom_xss_findings = await asyncio.to_thread(
+                    lambda: asyncio.run(spa.test_dom_xss(self.config.target, spa_routes))
+                )
+                if dom_xss_findings:
+                    print(f"  Playwright found {len(dom_xss_findings)} DOM XSS findings")
+                    self._spa_findings.extend(dom_xss_findings)
+            except Exception as e:
+                print(f"  Playwright SPA phases failed: {e}")
+
+        if cache_path:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(sitemap.model_dump_json())
+            print(f"  Saved sitemap cache to {cache_path} "
+                  f"({len(sitemap.endpoints)} endpoints)")
+
+        return sitemap
 
     def _dispatch_to_queues(self, sitemap: SiteMap, modules: list[str]) -> None:
         """Dispatch crawled endpoints to per-module queues based on relevance.

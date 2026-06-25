@@ -47,6 +47,12 @@ class ScanConfig(BaseSettings):
     target: str = ""
     engagement_file: str = ""
     database_url: str = "postgresql://diana:diana_dev@localhost:5432/diana"
+    # Optional path to a cached SiteMap (JSON). If the file exists, the crawl
+    # phase is skipped and endpoints are loaded from it; if it doesn't, the
+    # crawl runs normally and the resulting sitemap is written here for reuse.
+    # Lets fast inner-loop iterations reuse a stable crawl when a change does
+    # not touch the crawler.
+    sitemap_cache: str = ""
     depth: int = 3
     rate_limit: int = 10
     timeout: int = 30
