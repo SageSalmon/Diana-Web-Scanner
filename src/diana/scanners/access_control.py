@@ -243,20 +243,25 @@ class AccessControlScanner(BaseScanner):
             endpoints.append(ep)
 
         if self._llm and not config.no_ai:
-            # AI-driven: let the agent reason about and execute tests
+            # AI-driven: let the agent reason about and execute multi-step tests.
             ai_findings = await self._run_ai_agent(endpoints, work_items)
             findings.extend(ai_findings)
-        else:
-            # Fallback: generic structural tests (no hardcoded paths)
-            findings.extend(await self._test_idor_by_id(endpoints))
-            findings.extend(await self._test_method_tampering(endpoints))
-            findings.extend(await self._test_role_escalation(endpoints))
-            findings.extend(await self._test_unauthenticated_access(endpoints))
+
+        # Always run the deterministic structural sweep — even with AI enabled.
+        # The AI agent tends to fixate on easy unauthenticated reads and skip the
+        # systematic authenticated cross-user IDOR / method-tampering / role tests,
+        # which are what actually exercise (and confirm) authorization flaws. These
+        # are generic REST tests with no app-specific paths, and they issue the
+        # authenticated requests directly rather than relying on the model's choices.
+        findings.extend(await self._test_idor_by_id(endpoints))
+        findings.extend(await self._test_method_tampering(endpoints))
+        findings.extend(await self._test_role_escalation(endpoints))
+        findings.extend(await self._test_unauthenticated_access(endpoints))
 
         for item in work_items:
             self.complete_work(item["queue_id"])
 
-        return findings
+        return self._dedupe_findings(findings)
 
     async def _run_ai_agent(self, endpoints: list[Endpoint], work_items: list[dict]) -> list[Finding]:
         """Run the AI agent to discover and exploit access control flaws."""
@@ -586,6 +591,24 @@ class AccessControlScanner(BaseScanner):
             headers["Authorization"] = f"Bearer {token}"
         async with httpx.AsyncClient(timeout=10) as client:
             return await client.request(method, url, headers=headers, json=json_body)
+
+    @staticmethod
+    def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
+        """Collapse findings describing the same flaw at the same endpoint.
+
+        The AI agent and the deterministic sweep can each surface the same
+        issue; dedupe by (title, url, method) so one logical authorization flaw
+        is reported once.
+        """
+        seen: set[tuple[str, str, str]] = set()
+        unique: list[Finding] = []
+        for f in findings:
+            key = (f.title.strip().lower(), f.endpoint.url, f.endpoint.method)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(f)
+        return unique
 
     @staticmethod
     def _responses_have_same_structure(body1: str, body2: str) -> bool:
