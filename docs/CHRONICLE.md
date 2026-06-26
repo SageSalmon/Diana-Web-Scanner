@@ -86,3 +86,56 @@ Next opportunities:
 - Input Validation fuzzing (0/14) — zero/empty/boundary values on API endpoints
 
 ---
+
+## Iteration 4 — Make access_control work + tiny-loop tooling (2026-06-26) ✓ MERGED
+
+**Solve rate: 7.1% → 7.1% (unchanged)**  |  access_control findings: 0 → 26 (2 CRITICAL, 24 HIGH)
+**Cost: ~$3 (1 seed + 3 cached tiny-loop runs)**  |  Cumulative: ~$5.75
+
+A capability win the solve-rate metric doesn't capture. Enabled the
+access_control module by default — then discovered, via a new fast inner-loop
+harness, that it was broken end-to-end and fixed it across four iterations.
+
+**New tooling — the tiny loop (`agent-tinyloop`):** a lean iteration harness in
+the same AWS sandbox as validation. It reuses a cached crawl (`--sitemap-cache`)
+to skip the expensive Playwright crawl, runs only the module under test, and
+asserts against the Juice Shop scoreboard. First (seed) run 2660s; cached runs
+**~530–580s (4.5× faster)**. Reuses the validation task definition via an
+`AGENT_ENTRYPOINT` env shim — no Terraform change. This made the four-iteration
+debug loop below cheap enough to do in an afternoon.
+
+**Four blockers found and fixed (each surfaced by one tiny-loop run):**
+1. The deterministic authenticated IDOR/method/role sweep only ran in the
+   no-AI fallback — the AI agent fixated on easy unauthenticated reads and never
+   did the authenticated sweep. → always run the deterministic sweep.
+2. `report_finding` had no dedup — one flaw reported ~25× (78 noise findings).
+   → dedup by (title, endpoint, method).
+3. The orchestrator dispatch dropped endpoint parameters (`has_params` only), so
+   the sweep's `"id" in ep.parameters` gate matched nothing. → pass parameters.
+4. `claim_work(50)` claimed only the first ~16 endpoints; the numeric-id
+   resources sit at sitemap positions 57–68. → claim the full queue + dedup
+   endpoints across auth levels.
+
+**Result:** access_control now authenticates as both admin and a low-priv user,
+sweeps every id-endpoint, and produces **26 confirmed authorization findings**
+(real IDOR: a low-priv user reads `/api/Users/2`, `/api/Feedbacks/2`,
+`/api/BasketItems/2`, etc.). All scanner logic stays framework-agnostic
+(generality PASS) — it tests whatever the crawler discovers, no target paths.
+
+**The honest boundary:** the 5 targeted Broken Access Control challenges stayed
+**0/5 solved**. Juice Shop's scoreboard fires only on the *exact* exploit
+fingerprint (e.g. `GET /rest/basket/{id}`, a meaningful `PUT` body, a forged
+`UserId` on `POST /api/Feedbacks`), which differs from generic IDOR detection.
+Closing that gap would require target-specific exploit code that the generality
+gate correctly rejects. So solve-rate is a poor proxy here: the scanner got
+materially better at finding real authorization flaws (0 → 26) without the
+benchmark moving.
+
+Next opportunities:
+- Generalizable exploit primitives that may also fingerprint-match: test
+  `/rest/basket/{id}` style resource paths, meaningful PUT bodies, forged-id
+  POSTs — staying framework-agnostic.
+- Apply the tiny loop to cheaper modules (Input Validation, headers) where fast
+  iteration pays off even more than for the AI-heavy access_control module.
+
+---
