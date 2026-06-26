@@ -242,6 +242,14 @@ class AccessControlScanner(BaseScanner):
             )
             endpoints.append(ep)
 
+        id_eps = sum(1 for ep in endpoints if "id" in ep.parameters)
+        print(
+            f"  access_control: {len(endpoints)} endpoints "
+            f"({id_eps} with id param) | "
+            f"admin_token={'yes' if self._admin_token else 'NO'} "
+            f"user_token={'yes' if self._low_priv_token else 'NO'}"
+        )
+
         if self._llm and not config.no_ai:
             # AI-driven: let the agent reason about and execute multi-step tests.
             ai_findings = await self._run_ai_agent(endpoints, work_items)
@@ -392,11 +400,15 @@ class AccessControlScanner(BaseScanner):
             try:
                 # Access as admin
                 admin_resp = await self._request_as(ep.url, "GET", self._admin_token)
+                # Same resource as low-priv user
+                user_resp = await self._request_as(ep.url, "GET", self._low_priv_token)
+                print(
+                    f"  access_control IDOR: {ep.method} {ep.url} "
+                    f"admin={admin_resp.status_code} user={user_resp.status_code}"
+                )
                 if admin_resp.status_code != 200:
                     continue
 
-                # Same resource as low-priv user
-                user_resp = await self._request_as(ep.url, "GET", self._low_priv_token)
                 if (
                     user_resp.status_code == 200
                     and len(user_resp.text) > 20

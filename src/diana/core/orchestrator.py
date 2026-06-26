@@ -432,12 +432,15 @@ class ScanOrchestrator:
                         payload = {"type": "base_url"}
 
                 elif module in ("access_control",):
-                    # Access control needs all three auth levels
+                    # Access control needs all three auth levels. Pass the actual
+                    # parameters through — the module's IDOR sweep keys on them
+                    # (e.g. numeric "id"), so dropping them makes it test nothing.
                     for auth_level in ["admin", "user", "none"]:
                         self.state.enqueue(
                             self.scan_id, module, "crawler",
                             ep.url, ep.method, auth_context=auth_level,
-                            payload={"has_params": has_params},
+                            payload={"has_params": has_params,
+                                     "parameters": ep.parameters},
                         )
                     continue
 
