@@ -199,7 +199,12 @@ class AccessControlScanner(BaseScanner):
     async def scan(self, config: ScanConfig) -> list[Finding]:
         findings: list[Finding] = []
 
-        work_items = self.claim_work(limit=50)
+        # Claim the whole queue, not just the first page. Items are enqueued in
+        # sitemap order, and the numeric-id resource endpoints (the ones the IDOR
+        # sweep needs) cluster late — a small page claims only collection/SPA
+        # endpoints and starves the sweep. The deterministic sweep is cheap HTTP,
+        # so covering all endpoints is fine; the AI agent still slices its own cap.
+        work_items = self.claim_work(limit=1000)
         if not work_items:
             return findings
 
@@ -231,9 +236,16 @@ class AccessControlScanner(BaseScanner):
                     self.complete_work(item["queue_id"])
                 return findings
 
-        # Build endpoints from work items
+        # Build endpoints from work items, deduped by (method, url): each endpoint
+        # is enqueued once per auth level (admin/user/none), but the sweep tests
+        # all three levels itself, so the repeats are pure redundancy here.
         endpoints = []
+        seen_eps: set[tuple[str, str]] = set()
         for item in work_items:
+            key = (item.get("method", "GET"), item["url"])
+            if key in seen_eps:
+                continue
+            seen_eps.add(key)
             params = item.get("payload", {}) or {}
             ep = Endpoint(
                 url=item["url"],
