@@ -76,6 +76,7 @@ class ToolUsingAgent:
         self.module_name = module_name
         self._findings: list[Finding] = []
         self._seen_requests: set[str] = set()
+        self._reported_keys: set[str] = set()
 
     async def run(
         self,
@@ -85,6 +86,7 @@ class ToolUsingAgent:
         """Run the LangGraph ReAct agent and return discovered findings."""
         self._findings = []
         self._seen_requests = set()
+        self._reported_keys = set()
 
         # Build tools with closure over self for state access
         tools = self._build_tools()
@@ -216,6 +218,13 @@ class ToolUsingAgent:
                 remediation: How to fix the vulnerability
                 payload_used: The payload that triggered the vulnerability
             """
+            # Collapse repeat reports of the same flaw — the model often calls
+            # report_finding many times for one issue, flooding results and the DB.
+            dedup_key = f"{title.strip().lower()}|{endpoint}|{method.upper()}"
+            if dedup_key in agent._reported_keys:
+                return "Duplicate finding ignored — already reported. Move on to a new test."
+            agent._reported_keys.add(dedup_key)
+
             print(f"  AI agent: FINDING - {title}")
 
             finding = Finding(

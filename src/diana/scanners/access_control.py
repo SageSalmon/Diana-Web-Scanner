@@ -199,7 +199,12 @@ class AccessControlScanner(BaseScanner):
     async def scan(self, config: ScanConfig) -> list[Finding]:
         findings: list[Finding] = []
 
-        work_items = self.claim_work(limit=50)
+        # Claim the whole queue, not just the first page. Items are enqueued in
+        # sitemap order, and the numeric-id resource endpoints (the ones the IDOR
+        # sweep needs) cluster late — a small page claims only collection/SPA
+        # endpoints and starves the sweep. The deterministic sweep is cheap HTTP,
+        # so covering all endpoints is fine; the AI agent still slices its own cap.
+        work_items = self.claim_work(limit=1000)
         if not work_items:
             return findings
 
@@ -231,9 +236,16 @@ class AccessControlScanner(BaseScanner):
                     self.complete_work(item["queue_id"])
                 return findings
 
-        # Build endpoints from work items
+        # Build endpoints from work items, deduped by (method, url): each endpoint
+        # is enqueued once per auth level (admin/user/none), but the sweep tests
+        # all three levels itself, so the repeats are pure redundancy here.
         endpoints = []
+        seen_eps: set[tuple[str, str]] = set()
         for item in work_items:
+            key = (item.get("method", "GET"), item["url"])
+            if key in seen_eps:
+                continue
+            seen_eps.add(key)
             params = item.get("payload", {}) or {}
             ep = Endpoint(
                 url=item["url"],
@@ -242,21 +254,34 @@ class AccessControlScanner(BaseScanner):
             )
             endpoints.append(ep)
 
+        id_eps = sum(1 for ep in endpoints if "id" in ep.parameters)
+        print(
+            f"  access_control: {len(endpoints)} endpoints "
+            f"({id_eps} with id param) | "
+            f"admin_token={'yes' if self._admin_token else 'NO'} "
+            f"user_token={'yes' if self._low_priv_token else 'NO'}"
+        )
+
         if self._llm and not config.no_ai:
-            # AI-driven: let the agent reason about and execute tests
+            # AI-driven: let the agent reason about and execute multi-step tests.
             ai_findings = await self._run_ai_agent(endpoints, work_items)
             findings.extend(ai_findings)
-        else:
-            # Fallback: generic structural tests (no hardcoded paths)
-            findings.extend(await self._test_idor_by_id(endpoints))
-            findings.extend(await self._test_method_tampering(endpoints))
-            findings.extend(await self._test_role_escalation(endpoints))
-            findings.extend(await self._test_unauthenticated_access(endpoints))
+
+        # Always run the deterministic structural sweep — even with AI enabled.
+        # The AI agent tends to fixate on easy unauthenticated reads and skip the
+        # systematic authenticated cross-user IDOR / method-tampering / role tests,
+        # which are what actually exercise (and confirm) authorization flaws. These
+        # are generic REST tests with no app-specific paths, and they issue the
+        # authenticated requests directly rather than relying on the model's choices.
+        findings.extend(await self._test_idor_by_id(endpoints))
+        findings.extend(await self._test_method_tampering(endpoints))
+        findings.extend(await self._test_role_escalation(endpoints))
+        findings.extend(await self._test_unauthenticated_access(endpoints))
 
         for item in work_items:
             self.complete_work(item["queue_id"])
 
-        return findings
+        return self._dedupe_findings(findings)
 
     async def _run_ai_agent(self, endpoints: list[Endpoint], work_items: list[dict]) -> list[Finding]:
         """Run the AI agent to discover and exploit access control flaws."""
@@ -387,11 +412,15 @@ class AccessControlScanner(BaseScanner):
             try:
                 # Access as admin
                 admin_resp = await self._request_as(ep.url, "GET", self._admin_token)
+                # Same resource as low-priv user
+                user_resp = await self._request_as(ep.url, "GET", self._low_priv_token)
+                print(
+                    f"  access_control IDOR: {ep.method} {ep.url} "
+                    f"admin={admin_resp.status_code} user={user_resp.status_code}"
+                )
                 if admin_resp.status_code != 200:
                     continue
 
-                # Same resource as low-priv user
-                user_resp = await self._request_as(ep.url, "GET", self._low_priv_token)
                 if (
                     user_resp.status_code == 200
                     and len(user_resp.text) > 20
@@ -586,6 +615,24 @@ class AccessControlScanner(BaseScanner):
             headers["Authorization"] = f"Bearer {token}"
         async with httpx.AsyncClient(timeout=10) as client:
             return await client.request(method, url, headers=headers, json=json_body)
+
+    @staticmethod
+    def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
+        """Collapse findings describing the same flaw at the same endpoint.
+
+        The AI agent and the deterministic sweep can each surface the same
+        issue; dedupe by (title, url, method) so one logical authorization flaw
+        is reported once.
+        """
+        seen: set[tuple[str, str, str]] = set()
+        unique: list[Finding] = []
+        for f in findings:
+            key = (f.title.strip().lower(), f.endpoint.url, f.endpoint.method)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(f)
+        return unique
 
     @staticmethod
     def _responses_have_same_structure(body1: str, body2: str) -> bool:

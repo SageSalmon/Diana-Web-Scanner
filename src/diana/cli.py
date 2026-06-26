@@ -55,6 +55,11 @@ def scan(
     modules: Optional[str] = typer.Option(
         None, "--modules", "-m", help="Comma-separated list of scan modules"
     ),
+    sitemap_cache: Optional[str] = typer.Option(
+        None, "--sitemap-cache",
+        help="Path to a cached sitemap JSON. Loaded (skipping the crawl) if it "
+             "exists; otherwise the crawl runs and the sitemap is saved here.",
+    ),
     depth: int = typer.Option(3, "--depth", "-d", help="Maximum crawl depth"),
     rate_limit: int = typer.Option(10, "--rate-limit", "-r", help="Max requests/second"),
     timeout: int = typer.Option(30, "--timeout", help="Request timeout in seconds"),
@@ -104,6 +109,9 @@ def scan(
 
     if modules:
         scan_config.scan.modules = [m.strip() for m in modules.split(",")]
+
+    if sitemap_cache:
+        scan_config.sitemap_cache = sitemap_cache
 
     scan_config.reporting.format = format
     scan_config.reporting.output = output

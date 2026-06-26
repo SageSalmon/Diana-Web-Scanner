@@ -39,17 +39,32 @@ CLUSTER_ARN="${ECS_CLUSTER:-$(get_tf_output cluster_arn)}"
 SUBNETS="${ECS_SUBNETS:-$(get_tf_output private_subnet_ids)}"
 SG="${ECS_SG:-$(get_tf_output scanner_sg_id)}"
 
-# Map task type to task definition family
+# Map task type to task definition family.
+# tinyloop reuses the validation task definition (same sidecar/DB/Bedrock wiring)
+# and swaps the entrypoint via the AGENT_ENTRYPOINT env override below.
 case "$TASK_TYPE" in
   validation) TASK_FAMILY="diana-agent-validation"; CONTAINER_NAME="diana-scanner" ;;
   test)       TASK_FAMILY="diana-agent-test";       CONTAINER_NAME="diana-test" ;;
   benchmark)  TASK_FAMILY="diana-agent-benchmark";  CONTAINER_NAME="diana-scanner" ;;
+  tinyloop)   TASK_FAMILY="diana-agent-validation"; CONTAINER_NAME="diana-scanner" ;;
   *)
     echo "ERROR: Unknown task type: $TASK_TYPE"
-    echo "Valid types: validation, test, benchmark"
+    echo "Valid types: validation, test, benchmark, tinyloop"
     exit 1
     ;;
 esac
+
+# Tiny-loop extra environment: select its entrypoint and pass the module(s)
+# under test, the challenges to report on, and the shared sitemap cache key.
+# Read from env: MODULES, TARGET_CHALLENGES, SITEMAP_CACHE_KEY.
+EXTRA_ENV=""
+if [ "$TASK_TYPE" = "tinyloop" ]; then
+  EXTRA_ENV=",
+        {\"name\": \"AGENT_ENTRYPOINT\", \"value\": \"/app/scripts/entrypoint-tinyloop.sh\"},
+        {\"name\": \"MODULES\", \"value\": \"${MODULES:-access_control}\"},
+        {\"name\": \"TARGET_CHALLENGES\", \"value\": \"${TARGET_CHALLENGES:-}\"},
+        {\"name\": \"SITEMAP_CACHE_KEY\", \"value\": \"${SITEMAP_CACHE_KEY:-cache/juiceshop-sitemap.json}\"}"
+fi
 
 echo "=== Diana Agent Task Launcher ==="
 echo "Task type: $TASK_TYPE"
@@ -107,7 +122,7 @@ TASK_ARN=$(aws ecs run-task \
       \"name\": \"$CONTAINER_NAME\",
       \"environment\": [
         {\"name\": \"RUN_ID\", \"value\": \"$RUN_ID\"},
-        {\"name\": \"BRANCH_REF\", \"value\": \"$BRANCH_REF\"}
+        {\"name\": \"BRANCH_REF\", \"value\": \"$BRANCH_REF\"}$EXTRA_ENV
       ]
     }]
   }" \

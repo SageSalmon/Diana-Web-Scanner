@@ -13,6 +13,14 @@
 
 set -euo pipefail
 
+# Env-selected entrypoint shim: ECS run-task can override `environment` but not
+# `entryPoint`, so to reuse this task definition (and its Juice Shop sidecar, DB,
+# and Bedrock wiring) to launch a different agent — e.g. the tiny loop — set
+# AGENT_ENTRYPOINT to that script. Unset = normal validation behavior.
+if [ -n "${AGENT_ENTRYPOINT:-}" ] && [ "${AGENT_ENTRYPOINT}" != "${BASH_SOURCE[0]}" ]; then
+  exec /bin/bash "${AGENT_ENTRYPOINT}" "$@"
+fi
+
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 BRANCH_REF="${BRANCH_REF:-main}"
 TARGET_URL="${TARGET_URL:-http://localhost:3000}"
