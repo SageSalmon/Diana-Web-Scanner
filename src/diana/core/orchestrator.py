@@ -458,6 +458,18 @@ class ScanOrchestrator:
                 elif module == "info_disclosure":
                     should_enqueue = True
 
+                elif module == "input_validation":
+                    # Fuzz observed request bodies (captured from XHR during the
+                    # SPA crawl) and query/form parameters. Body endpoints carry
+                    # the example body for replay-and-mutate.
+                    if ep.request_body:
+                        should_enqueue = True
+                        payload = {"request_body": ep.request_body,
+                                   "parameters": ep.parameters}
+                    elif has_params:
+                        should_enqueue = True
+                        payload = {"parameters": ep.parameters}
+
                 elif module == "ssrf":
                     if has_params and any(
                         p in ["url", "uri", "link", "href", "src", "redirect",

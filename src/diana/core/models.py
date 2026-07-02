@@ -45,6 +45,7 @@ class VulnType(str, Enum):
     SECURITY_HEADERS = "missing_security_headers"
     CORS_MISCONFIGURATION = "cors_misconfiguration"
     INFO_DISCLOSURE = "information_disclosure"
+    IMPROPER_INPUT_VALIDATION = "improper_input_validation"
     WEAK_CRYPTO = "weak_cryptography"
     OPEN_REDIRECT = "open_redirect"
     DEBUG_ENDPOINT = "debug_endpoint_exposed"
@@ -57,6 +58,10 @@ class Endpoint(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     content_type: str = ""
     requires_auth: bool = False
+    # Observed example JSON request body (field name -> value), captured from
+    # XHR/fetch traffic during the SPA crawl. Lets input-validation replay the
+    # request and mutate one field at a time while keeping the rest valid.
+    request_body: dict[str, Any] = Field(default_factory=dict)
 
 
 class Form(BaseModel):

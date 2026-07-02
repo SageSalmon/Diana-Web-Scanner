@@ -11,6 +11,7 @@ from diana.scanners.discovery import DiscoveryScanner
 from diana.scanners.discovery_agent import DiscoveryAgent
 from diana.scanners.headers import HeadersScanner
 from diana.scanners.info_disclosure import InfoDisclosureScanner
+from diana.scanners.input_validation import InputValidationScanner
 from diana.scanners.sqli import SQLiScanner
 from diana.scanners.sqli_agent import SQLiAgent
 from diana.scanners.ssrf import SSRFScanner
@@ -29,6 +30,7 @@ class ScannerRegistry:
             "ssrf": SSRFScanner(http, ai_agent),
             "headers": HeadersScanner(http, ai_agent),
             "info_disclosure": InfoDisclosureScanner(http, ai_agent),
+            "input_validation": InputValidationScanner(http, ai_agent),
             "auth": AuthScanner(http, ai_agent),
             "discovery": DiscoveryScanner(http, ai_agent),
             # AI agent modules (require Bedrock, skip gracefully without)
