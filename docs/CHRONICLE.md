@@ -139,3 +139,48 @@ Next opportunities:
   iteration pays off even more than for the AI-heavy access_control module.
 
 ---
+
+## Iteration 5 — Input Validation module + SPA body capture (2026-07-02) ✓ MERGED
+
+**Solve rate: 7.1% → 9.7% (8/113 → 11/113, +3)**  |  Findings: 214 (14 critical, 30 high)
+**Cost: ~$0.20 Fargate (Bedrock tokens not captured this run)**  |  Cumulative: ~$6
+
+The first metric-moving iteration since access_control — and the solves are
+causally attributable to the change, with **zero regressions**. Built a generic
+`input_validation` scanner (replay-and-mutate: takes discovered request
+bodies/params and resubmits them with zero/negative/empty/null/oversized/
+type-mismatch values, flagging invalid-input-accepted) plus **SPA XHR body
+capture** in the crawler (`page.on("request")` + best-effort fill-and-submit) so
+POST/PUT payloads are actually discovered for mutation.
+
+**Three new solves, all traceable to the change:**
+- *Admin Registration* (d3) and *Repetitive Registration* (d1) — both Improper
+  Input Validation, the exact class the scanner targets (category 0→2 / 12).
+- *Five-Star Feedback* (d2, Broken Access Control) — surfaced because the new
+  SPA body capture fed a POST body into the downstream access_control sweep.
+
+All logic stays framework-agnostic (generality PASS): it mutates whatever the
+crawler discovers, with no target paths or exploit fingerprints. Full
+`agent-validation` was used (not the tiny loop) because the crawler changed,
+invalidating the cached-crawl shortcut. 31 new unit/integration tests pass; the
+two pre-existing XSS failures in `test_xss.py` are unrelated and unchanged.
+
+**The honest boundary (as predicted):** cart/checkout challenges like *Payback
+Time* stayed unsolved. They need authenticated, multi-step journeys that passive
+body capture cannot synthesize — the motivating case for the proposed Iteration
+6 archetype profiler (`docs/FUTURE_ARCHETYPE_PROFILER.md`): crawl → profile (tag
+archetypes) → dispatch matching playbooks, gating cart-journey exploitation to
+detected shopping-cart archetypes.
+
+Next opportunities (from the gap analysis):
+- **Sensitive Data Exposure (0/16)** — largest untouched category, highest
+  real-world value: content/path discovery (well-known paths, backup
+  extensions, source-map exposure). Top pick.
+- Extend injection probes to the request bodies the SPA capture now discovers
+  (Injection tail 3/14).
+- The archetype profiler to unlock authenticated multi-step BAC/cart journeys.
+
+Housekeeping: `token_usage` came back empty this run — the emitter needs a fix
+so future runs record Bedrock cost.
+
+---
