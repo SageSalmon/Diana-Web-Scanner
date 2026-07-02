@@ -9,15 +9,67 @@ Complements the HTTP crawler by:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urlsplit
 
 from diana.core.http_client import ScopedHTTPClient
 from diana.core.models import Endpoint, Finding, Form, FormField, Severity, SiteMap, VulnType
 
 logger = logging.getLogger(__name__)
+
+# Request methods whose JSON bodies we capture for input-validation fuzzing.
+BODY_METHODS = {"POST", "PUT", "PATCH"}
+
+
+def _benign_value(field_type: str, name: str) -> str:
+    """A plausible, valid value for a form field so submission succeeds and the
+    resulting XHR fires. Generic by field type/name — no target-specific values."""
+    ft = (field_type or "").lower()
+    n = (name or "").lower()
+    if ft == "email" or "email" in n:
+        return "diana.test@example.com"
+    if ft == "password" or "password" in n or "passwd" in n:
+        return "DianaTest123!"
+    numeric_hints = ("amount", "qty", "quantity", "count", "rating", "stars")
+    if ft == "number" or any(k in n for k in numeric_hints):
+        return "1"
+    if ft in ("url", "tel", "search"):
+        return "diana-test"
+    return "diana-test"
+
+
+def _capture_json_body(
+    method: str, url: str, post_data: str | None, base_origin: str,
+) -> tuple[tuple[str, str], dict] | None:
+    """Decide whether an observed request carries a JSON object body worth
+    keeping, and if so return ((METHOD, url-without-query), body).
+
+    Returns None for non-body methods, out-of-scope origins, empty/non-JSON
+    bodies, or JSON that isn't a non-empty object. Pure function — unit-tested
+    directly so the live request listener stays a thin wrapper.
+    """
+    method = (method or "").upper()
+    if method not in BODY_METHODS:
+        return None
+    if _origin_of(url) != base_origin:
+        return None
+    if not post_data:
+        return None
+    try:
+        body = json.loads(post_data)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(body, dict) or not body:
+        return None
+    return (method, url.split("?", 1)[0]), body
+
+
+def _origin_of(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
 
 # Route definition patterns across major SPA frameworks
 ROUTE_PATTERNS = [
@@ -103,17 +155,33 @@ class SPACrawler:
         others = [r for r in routes if r not in priority]
         ordered = (priority + others)[:max_routes]
 
+        # Captured JSON request bodies from XHR/fetch traffic, keyed by
+        # (METHOD, url-without-query) so we keep one example per endpoint.
+        captured_bodies: dict[tuple[str, str], dict] = {}
+        base_origin = _origin_of(base_url)
+
+        def _on_request(request) -> None:
+            try:
+                result = _capture_json_body(
+                    request.method, request.url, request.post_data, base_origin,
+                )
+                if result:
+                    key, body = result
+                    captured_bodies.setdefault(key, body)
+            except Exception:
+                return  # never let a captured request break the crawl
+
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
                 page = await browser.new_page()
+                page.on("request", _on_request)
 
                 for route in ordered:
                     url = f"{base}/#{route}" if not route.startswith("/") else f"{base}#{route}"
 
                     try:
                         await page.goto(url, wait_until="networkidle", timeout=10000)
-                        html = await page.content()
 
                         # Extract forms from rendered page
                         forms = await self._extract_rendered_forms(page, url)
@@ -136,6 +204,11 @@ class SPACrawler:
                             parameters=params,
                         ))
 
+                        # Best-effort: fill visible inputs with benign values and
+                        # submit, so the SPA issues its create/update XHR and we
+                        # observe the request body. Generic across frameworks.
+                        await self._fill_and_submit(page)
+
                     except Exception as e:
                         logger.debug("Failed to crawl route %s: %s", route, e)
                         continue
@@ -144,7 +217,58 @@ class SPACrawler:
         except Exception as e:
             logger.warning("Playwright crawl failed: %s", e)
 
+        # Turn captured XHR bodies into POST/PUT endpoints for the
+        # input-validation module to replay and mutate.
+        for (method, body_url), body in captured_bodies.items():
+            endpoints.append(Endpoint(
+                url=body_url,
+                method=method,
+                request_body=body,
+            ))
+
         return endpoints
+
+    async def _fill_and_submit(self, page) -> None:
+        """Fill visible form fields with benign values and submit each form,
+        triggering its XHR so the request body is observed. Bounded and
+        best-effort — failures on any single form are ignored."""
+        try:
+            forms = await page.query_selector_all("form")
+        except Exception:
+            return
+
+        for form_el in forms[:5]:  # cap interaction per page
+            try:
+                inputs = await form_el.query_selector_all(
+                    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea'
+                )
+                filled = False
+                for inp in inputs:
+                    name = (await inp.get_attribute("name")
+                            or await inp.get_attribute("id")
+                            or await inp.get_attribute("formcontrolname") or "")
+                    field_type = await inp.get_attribute("type") or "text"
+                    try:
+                        await inp.fill(_benign_value(field_type, name), timeout=1000)
+                        filled = True
+                    except Exception:
+                        continue
+                if not filled:
+                    continue
+
+                # Try a real submit control first, then fall back to Enter.
+                submit = await form_el.query_selector(
+                    'button[type="submit"], input[type="submit"], button:not([type])'
+                )
+                if submit:
+                    await submit.click(timeout=1000, no_wait_after=True)
+                else:
+                    await inputs[-1].press("Enter", timeout=1000, no_wait_after=True)
+
+                # Give the XHR a moment to fire and be captured.
+                await page.wait_for_timeout(500)
+            except Exception:
+                continue
 
     async def test_dom_xss(self, base_url: str, routes: list[str]) -> list[Finding]:
         """Test DOM XSS by injecting payloads into URL search parameters.
