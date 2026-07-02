@@ -43,6 +43,9 @@ MAX_REQUESTS = 500
 # Bytes of the response body compared to recognize a repeated soft-404 shell.
 HEAD_LEN = 200
 
+# How many levels of subdirectory a listing is followed into (0 = the dir only).
+MAX_LISTING_DEPTH = 2
+
 # Generic names for directories that commonly hold static, uploaded, or backup
 # content across web apps. Not target-specific — these are conventional names,
 # the same way "/admin" or "/api" are conventional.
@@ -106,15 +109,32 @@ class SensitiveDataExposureScanner(BaseScanner):
         discovered_files: set[str] = set()
         candidate_dirs = self._candidate_dirs(base, [w["url"] for w in work])
 
-        # 1) Directory listings — and harvest the files they reveal.
-        for dir_url in list(candidate_dirs)[:MAX_DIRS]:
+        # 1) Directory listings — breadth-first, so a listing that reveals
+        #    subdirectories (e.g. .../logs/) is followed one/two levels deeper.
+        #    Each listing also harvests the files it exposes.
+        dir_queue = list(candidate_dirs)[:MAX_DIRS]
+        depth = {d: 0 for d in dir_queue}
+        checked: set[str] = set()
+        i = 0
+        while i < len(dir_queue):
+            dir_url = dir_queue[i]
+            i += 1
             if self._requests_sent >= MAX_REQUESTS:
                 break
-            listing, listed = await self._check_listing(dir_url, seen)
+            if dir_url in checked:
+                continue
+            checked.add(dir_url)
+            listing, listed, subdirs = await self._check_listing(dir_url, seen)
             if listing:
                 findings.append(listing)
             for f in listed:
                 discovered_files.add(f)
+            if depth.get(dir_url, 0) < MAX_LISTING_DEPTH:
+                for sd in subdirs:
+                    if sd not in checked and sd not in depth \
+                            and len(dir_queue) < MAX_DIRS + 40:
+                        depth[sd] = depth[dir_url] + 1
+                        dir_queue.append(sd)
 
         # Seed backup probing with static files seen during the crawl too.
         for w in work:
@@ -178,14 +198,14 @@ class SensitiveDataExposureScanner(BaseScanner):
     async def _check_listing(self, dir_url: str, seen: set[str]):
         resp = await self._get(dir_url)
         if resp is None or resp.status_code != 200:
-            return None, []
+            return None, [], []
         body = resp.text
         if self._looks_like_not_found(resp):
-            return None, []
+            return None, [], []
         if not any(m.search(body) for m in _LISTING_MARKERS):
-            return None, []
+            return None, [], []
 
-        listed = self._parse_listed_files(dir_url, body)
+        listed, subdirs = self._parse_listing(dir_url, body)
         finding = None
         if dir_url not in seen:
             seen.add(dir_url)
@@ -205,18 +225,21 @@ class SensitiveDataExposureScanner(BaseScanner):
                 remediation="Disable automatic directory indexing on the web server.",
                 confirmed=True,
             )
-        return finding, listed
+        return finding, listed, subdirs
 
-    def _parse_listed_files(self, dir_url: str, body: str) -> list[str]:
+    def _parse_listing(self, dir_url: str, body: str) -> tuple[list[str], list[str]]:
+        """Split a listing's links into files and subdirectories (trailing /)."""
         files: list[str] = []
+        subdirs: list[str] = []
         for href in re.findall(r'href="([^"]+)"', body, re.I):
-            if href in ("../", "/", ".", "..") or href.startswith("?"):
+            if href in ("../", "/", ".", "..") or href.startswith(("?", "#")):
                 continue
-            files.append(urljoin(dir_url, href))
-        # Some Node servers emit a JSON array of names instead of HTML.
+            target = urljoin(dir_url, href)
+            (subdirs if href.endswith("/") else files).append(target)
+        # Some Node servers emit a JSON array of names instead of HTML anchors.
         for name in re.findall(r'"([^"/]+\.[a-z0-9]{1,6})"', body, re.I):
             files.append(urljoin(dir_url, name))
-        return files
+        return files, subdirs
 
     async def _probe_backups(self, file_url: str, seen: set[str]) -> list[Finding]:
         findings: list[Finding] = []

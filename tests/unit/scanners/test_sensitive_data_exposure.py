@@ -172,6 +172,31 @@ async def test_real_file_sharing_soft404_length_still_reported():
 
 
 @pytest.mark.asyncio
+async def test_recurses_into_subdirectory_listing():
+    # /support/ lists a logs/ subdir; logs/ lists access.log. The scanner must
+    # follow the subdirectory, report the nested listing, and fetch the file.
+    support_body = (
+        "<html><title>Index of /support</title>"
+        '<a href="../">../</a><a href="logs/">logs/</a></html>'
+    )
+    logs_body = (
+        "<html><title>Index of /support/logs</title>"
+        '<a href="../">../</a><a href="access.log">access.log</a></html>'
+    )
+    routes = {
+        "http://t/support/": (200, support_body),
+        "http://t/support/logs/": (200, logs_body),
+        "http://t/support/logs/access.log": (200, "1.2.3.4 - GET /secret " + "L" * 300),
+    }
+    scanner = _make(routes, ["http://t/app/main.js"])
+    findings = await scanner.scan(ScanConfig())
+
+    titles = " ".join(f.title for f in findings)
+    assert "http://t/support/logs/" in titles          # nested listing reported
+    assert "http://t/support/logs/access.log" in scanner.http.requested  # file fetched
+
+
+@pytest.mark.asyncio
 async def test_completes_all_work_items():
     scanner = _make({}, ["http://t/a.js", "http://t/b.js"])
     await scanner.scan(ScanConfig())
