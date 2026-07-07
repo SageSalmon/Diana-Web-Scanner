@@ -215,6 +215,12 @@ class ScanOrchestrator:
             result.modules_run = modules
             self._dispatch_to_queues(sitemap, modules)
 
+            # Capability profiling: tag application archetypes (rating,
+            # registration, …) from read-side signals, then enqueue targeted
+            # active probes into input_validation. This reaches write surfaces
+            # the passive SPA body-capture misses.
+            self._profile_and_enqueue(sitemap, modules)
+
             # Log queue stats after dispatch
             queue_stats = self.state.get_queue_stats(self.scan_id)
             print(f"\n  Queue dispatch:")
@@ -377,6 +383,40 @@ class ScanOrchestrator:
                   f"({len(sitemap.endpoints)} endpoints)")
 
         return sitemap
+
+    def _profile_and_enqueue(self, sitemap: SiteMap, modules: list[str]) -> None:
+        """Profile capability archetypes and enqueue targeted active probes.
+
+        The profiler is a shared upstream phase, not per-module logic: it tags
+        archetypes from the discovered endpoints (generic name/field lexicon),
+        then hands input_validation synthesised probe specs so it can actively
+        construct-and-submit abuse cases (out-of-range rating, empty/duplicate
+        registration) instead of only replaying captured bodies.
+        """
+        if "input_validation" not in modules:
+            return
+        from diana.core.archetypes import profile_capabilities, synthesis_specs
+
+        tags = profile_capabilities(sitemap.endpoints)
+        if not tags:
+            return
+        specs = synthesis_specs(tags, sitemap.endpoints)
+        by_arch: dict[str, int] = {}
+        for tag in tags:
+            by_arch[tag.archetype] = by_arch.get(tag.archetype, 0) + 1
+        print("\n  Capability profile: "
+              + ", ".join(f"{k}×{v}" for k, v in sorted(by_arch.items()))
+              + f" ({len(specs)} active probes)")
+
+        for spec in specs:
+            self.state.enqueue(
+                self.scan_id, "input_validation", "profiler",
+                spec["url"], spec["method"],
+                auth_context=spec.get("auth_context", "admin"),
+                payload={"synthesize": spec},
+                dedup_key=(f"synth|{spec['url']}|{spec['probe_kind']}|"
+                           f"{','.join(spec['target_fields'])}"),
+            )
 
     def _dispatch_to_queues(self, sitemap: SiteMap, modules: list[str]) -> None:
         """Dispatch crawled endpoints to per-module queues based on relevance.

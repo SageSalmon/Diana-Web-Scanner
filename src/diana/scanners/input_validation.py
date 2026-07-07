@@ -61,6 +61,7 @@ class InputValidationScanner(BaseScanner):
         seen_findings: set[tuple[str, str, str, str]] = set()
         body_eps = 0
         param_eps = 0
+        synth_probes = 0
 
         for item in work_items:
             if self._requests_sent >= MAX_REQUESTS:
@@ -72,8 +73,13 @@ class InputValidationScanner(BaseScanner):
             token = self._token_for(item.get("auth_context", "admin"))
             request_body = payload.get("request_body") or {}
             parameters = payload.get("parameters") or {}
+            synthesize = payload.get("synthesize") or {}
 
-            if request_body:
+            if synthesize:
+                synth_probes += 1
+                new = await self._probe_synthesis(synthesize, seen_findings)
+                findings.extend(new)
+            elif request_body:
                 body_eps += 1
                 new = await self._fuzz_body(
                     item["url"], method, request_body, token, seen_findings,
@@ -90,7 +96,8 @@ class InputValidationScanner(BaseScanner):
 
         print(
             f"  input_validation: {body_eps} body endpoints, {param_eps} param "
-            f"endpoints, {self._requests_sent} probes sent, {len(findings)} findings"
+            f"endpoints, {synth_probes} archetype probes, {self._requests_sent} "
+            f"probes sent, {len(findings)} findings"
         )
         return findings
 
@@ -157,6 +164,129 @@ class InputValidationScanner(BaseScanner):
                 if finding:
                     findings.append(finding)
         return findings
+
+    async def _probe_synthesis(
+        self,
+        spec: dict,
+        seen: set[tuple[str, str, str, str]],
+    ) -> list[Finding]:
+        """Actively construct-and-submit an archetype-targeted probe.
+
+        Unlike the replay paths, this does not require the crawl to have captured
+        a write body: the archetype profiler supplies a minimal synthesised body
+        and a generic abuse class (out-of-range value, empty required field,
+        duplicate submission). This reaches write surfaces the passive SPA
+        capture misses (e.g. a rating POST, a registration POST).
+        """
+        findings: list[Finding] = []
+        url = spec.get("url", "")
+        method = spec.get("method", "POST").upper()
+        token = self._token_for(spec.get("auth_context", "admin"))
+        base = dict(spec.get("base_body") or {})
+        kind = spec.get("probe_kind", "")
+        targets = spec.get("target_fields") or []
+        archetype = spec.get("archetype", "")
+
+        if kind == "duplicate":
+            # A registration/identity resource must reject a second identical
+            # submission. Establish the record, then re-submit it.
+            if self._requests_sent + 2 > MAX_REQUESTS:
+                return findings
+            await self._send(url, method, token, json_body=base)
+            resp = await self._send(url, method, token, json_body=base)
+            if resp is not None and resp.status_code in (200, 201):
+                f = self._synth_finding(
+                    url, method, archetype, "duplicate",
+                    ",".join(targets), resp.status_code, seen,
+                    "accepted a duplicate submission of an existing record",
+                )
+                if f:
+                    findings.append(f)
+            return findings
+
+        if kind == "empty_required" and len(targets) > 1:
+            # Some validators only reject when a single field is blank; submit
+            # one request with *all* required fields empty to catch the
+            # entirely-blank case too.
+            if self._requests_sent < MAX_REQUESTS:
+                body = dict(base)
+                for f in targets:
+                    body[f] = ""
+                resp = await self._send(url, method, token, json_body=body)
+                if resp is not None and resp.status_code in (200, 201):
+                    f = self._synth_finding(
+                        url, method, archetype, "empty_required",
+                        "+".join(targets), resp.status_code, seen,
+                        "accepted empty values for all required fields",
+                    )
+                    if f:
+                        findings.append(f)
+
+        # out_of_range / empty_required: one field at a time, base body intact.
+        values: list[Any]
+        if kind == "empty_required":
+            values = [""]
+        else:  # out_of_range
+            values = list(spec.get("values") or [])
+
+        for field in targets:
+            for value in values:
+                if self._requests_sent >= MAX_REQUESTS:
+                    return findings
+                body = dict(base)
+                body[field] = value
+                resp = await self._send(url, method, token, json_body=body)
+                if resp is None or resp.status_code not in (200, 201):
+                    continue
+                detail = (
+                    f"accepted an empty value for required field '{field}'"
+                    if kind == "empty_required"
+                    else f"accepted out-of-range value {value!r} for '{field}'"
+                )
+                f = self._synth_finding(
+                    url, method, archetype, kind, field,
+                    resp.status_code, seen, detail,
+                )
+                if f:
+                    findings.append(f)
+        return findings
+
+    def _synth_finding(
+        self,
+        url: str,
+        method: str,
+        archetype: str,
+        kind: str,
+        field: str,
+        status: int,
+        seen: set[tuple[str, str, str, str]],
+        detail: str,
+    ) -> Finding | None:
+        key = (method, url, field, kind)
+        if key in seen:
+            return None
+        seen.add(key)
+        return Finding(
+            id=f"IV-{uuid.uuid4().hex[:8]}",
+            vuln_type=VulnType.IMPROPER_INPUT_VALIDATION,
+            severity=Severity.MEDIUM,
+            title=(f"Improper input validation ({archetype}): "
+                   f"'{field or kind}' {kind.replace('_', ' ')}"),
+            description=(
+                f"The {archetype} write surface {method} {url} {detail} and the "
+                f"server responded {status}. This capability was detected by the "
+                f"archetype profiler; missing server-side validation on it can "
+                f"enable business-logic abuse."
+            ),
+            endpoint=Endpoint(url=url, method=method),
+            evidence=f"archetype={archetype} probe={kind} field={field} status={status}",
+            cwe_id="CWE-20",
+            remediation=(
+                "Validate all input server-side: enforce type, range, length, "
+                "required-field, and uniqueness constraints."
+            ),
+            confirmed=True,
+        )
 
     async def _send(
         self,

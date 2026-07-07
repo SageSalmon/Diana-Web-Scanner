@@ -187,3 +187,123 @@ async def test_request_budget_is_capped():
     await scanner.scan(config=SimpleNamespace(no_ai=True))
     assert scanner._requests_sent <= MAX_REQUESTS
     assert route.call_count <= MAX_REQUESTS
+
+
+# ---------------------------------------------------------------------------
+# Archetype synthesis probes — active construct-and-submit (profiler-driven)
+# ---------------------------------------------------------------------------
+
+def _synth_work(spec, queue_id=1):
+    return [{
+        "queue_id": queue_id,
+        "url": spec["url"],
+        "method": spec["method"],
+        "auth_context": spec.get("auth_context", "none"),
+        "payload": {"synthesize": spec},
+    }]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_synthesis_out_of_range_accepted_is_finding():
+    """A rating write that accepts an out-of-range value (0) is reported."""
+    route = respx.post("http://app/shop/reviews").mock(
+        return_value=httpx.Response(201, json={"id": 1})
+    )
+    spec = {
+        "archetype": "rating", "url": "http://app/shop/reviews",
+        "method": "POST", "auth_context": "admin",
+        "base_body": {"rating": 3, "comment": "diana feedback"},
+        "probe_kind": "out_of_range", "target_fields": ["rating"],
+        "values": [0, -1, 6],
+    }
+    scanner, _ = _make_scanner(work_items=_synth_work(spec),
+                               auth_headers={"Authorization": "Bearer ADMIN"})
+    findings = await scanner.scan(config=SimpleNamespace(no_ai=True))
+
+    assert route.called
+    assert findings and all(f.cwe_id == "CWE-20" for f in findings)
+    # The out-of-range value 0 was actually submitted with the rest of the body intact.
+    sent = [c.request.content for c in route.calls]
+    assert any(b'"rating": 0' in b or b'"rating":0' in b for b in sent)
+    assert any(b'comment' in b for b in sent)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_synthesis_out_of_range_rejected_is_not_finding():
+    respx.post("http://app/shop/reviews").mock(
+        return_value=httpx.Response(400, json={"error": "bad rating"})
+    )
+    spec = {
+        "archetype": "rating", "url": "http://app/shop/reviews",
+        "method": "POST", "auth_context": "admin",
+        "base_body": {"rating": 3}, "probe_kind": "out_of_range",
+        "target_fields": ["rating"], "values": [0, 6],
+    }
+    scanner, _ = _make_scanner(work_items=_synth_work(spec),
+                               auth_headers={"Authorization": "Bearer ADMIN"})
+    findings = await scanner.scan(config=SimpleNamespace(no_ai=True))
+    assert findings == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_synthesis_empty_required_accepted_is_finding():
+    """A registration accepting an empty required field is reported, and the
+    empty value is actually sent."""
+    route = respx.post("http://app/accounts").mock(
+        return_value=httpx.Response(201, json={"id": 9})
+    )
+    spec = {
+        "archetype": "account_registration", "url": "http://app/accounts",
+        "method": "POST", "auth_context": "none",
+        "base_body": {"email": "diana-probe@example.com", "password": "Diana!Probe1"},
+        "probe_kind": "empty_required", "target_fields": ["email", "password"],
+        "values": [],
+    }
+    scanner, _ = _make_scanner(work_items=_synth_work(spec))
+    findings = await scanner.scan(config=SimpleNamespace(no_ai=True))
+
+    assert route.called
+    assert findings
+    sent = [c.request.content for c in route.calls]
+    assert any(b'"email": ""' in b or b'"email":""' in b for b in sent)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_synthesis_duplicate_second_success_is_finding():
+    """Duplicate registration: two identical POSTs; the second succeeding means
+    uniqueness isn't enforced."""
+    route = respx.post("http://app/accounts").mock(
+        return_value=httpx.Response(201, json={"id": 1})
+    )
+    spec = {
+        "archetype": "account_registration", "url": "http://app/accounts",
+        "method": "POST", "auth_context": "none",
+        "base_body": {"email": "dup@example.com", "password": "x"},
+        "probe_kind": "duplicate", "target_fields": ["email"], "values": [],
+    }
+    scanner, _ = _make_scanner(work_items=_synth_work(spec))
+    findings = await scanner.scan(config=SimpleNamespace(no_ai=True))
+
+    assert route.call_count == 2  # setup + duplicate
+    assert findings and "duplicate" in findings[0].evidence
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_synthesis_duplicate_second_rejected_is_not_finding():
+    # First create succeeds, second is rejected (uniqueness enforced).
+    responses = [httpx.Response(201, json={"id": 1}), httpx.Response(409, json={"error": "exists"})]
+    respx.post("http://app/accounts").mock(side_effect=responses)
+    spec = {
+        "archetype": "account_registration", "url": "http://app/accounts",
+        "method": "POST", "auth_context": "none",
+        "base_body": {"email": "dup@example.com", "password": "x"},
+        "probe_kind": "duplicate", "target_fields": ["email"], "values": [],
+    }
+    scanner, _ = _make_scanner(work_items=_synth_work(spec))
+    findings = await scanner.scan(config=SimpleNamespace(no_ai=True))
+    assert findings == []
