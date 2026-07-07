@@ -82,7 +82,7 @@ SCAN_START=$(date +%s)
 python -m diana.cli scan "$TARGET_URL" \
   -e engagements/local-juiceshop.yaml \
   --local \
-  --modules headers,info_disclosure,xss,sqli,ssrf,auth,discovery,access_control,input_validation \
+  --modules headers,info_disclosure,xss,sqli,ssrf,auth,discovery,access_control,input_validation,sensitive_data_exposure \
   -d 3 -r 20 \
   -f json \
   -o "$RESULTS_DIR/" \

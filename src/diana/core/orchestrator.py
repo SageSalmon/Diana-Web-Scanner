@@ -458,6 +458,13 @@ class ScanOrchestrator:
                 elif module == "info_disclosure":
                     should_enqueue = True
 
+                elif module == "sensitive_data_exposure":
+                    # Needs the full set of discovered URLs: it derives candidate
+                    # directories (ancestors of each path) and static files to
+                    # probe for listings, backups, and extension-filter bypass.
+                    should_enqueue = True
+                    auth = "none"  # exposed content should be reachable unauthenticated
+
                 elif module == "input_validation":
                     # Fuzz observed request bodies (captured from XHR during the
                     # SPA crawl) and query/form parameters. Body endpoints carry
