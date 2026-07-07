@@ -140,6 +140,53 @@ Next opportunities:
 
 ---
 
+## Iteration 6 — Sensitive Data Exposure scanner (2026-07-07) ✓ MERGED
+
+**Solve rate: 9.7% → 14.2% (11/113 → 16/113, +5 net)**  |  Findings: 200 (2 critical, 36 high)
+**Cost: ~$0.20 Fargate (Bedrock tokens not captured this run)**  |  Cumulative: ~$6
+
+The largest single-iteration jump so far. Built a generic `sensitive_data_exposure`
+scanner that attacks exposed content three ways, all driven off whatever the
+crawler discovered: **open directory listings** (serve-index style, recursing
+into subdirectories up to depth 2), **backup-file probing** (`.bak ~ .old .orig`
+… on discovered static files), and **poison-null-byte extension-filter bypass**
+(`%00`/`%2500` + an allowed tail once a direct fetch is blocked). Soft-404s are
+suppressed by body-head comparison, not response length, so SPA shells don't
+generate phantom findings.
+
+**Six new solves (one over the tiny-loop's prediction of five):**
+- *Confidential Document*, *Misplaced Signature File*, *Easter Egg* — open
+  directory-listing exposure.
+- *Forgotten Sales Backup*, *Forgotten Developer Backup* — backup-file probes.
+- *Poison Null Byte* — the extension-filter bypass registered its own challenge.
+
+Sensitive Data Exposure category 0→3/16 (the rest of the new solves score under
+Miscellaneous/other categories). All logic is framework-agnostic (generality
+PASS): candidate directories are ancestors of discovered paths plus a generic
+wordlist, with no target paths or challenge fingerprints. 11 new unit tests pass.
+
+**One non-causal regression:** *Repetitive Registration* (Improper Input
+Validation, from Iteration 5) dropped. It's solved by the untouched
+`input_validation` module — which actually ran *harder* this run (178 probes /
+143 findings vs. 174 / 133) and still solved its sibling *Admin Registration*.
+The SDE module runs `auth=none` against different paths and never touches
+registration, so there is no causal path; the challenge needs the same signup
+POSTed several times in sequence and is inherently scoreboard-race sensitive.
+Counted against the +6 for a net +5.
+
+**The harness bug that cost three runs:** the scanner, registry, config, and
+orchestrator dispatch were all correct, yet three full validations returned
+10/113 with `sensitive_data_exposure` absent from the Queue-dispatch block. Root
+cause was two layers deep: `scripts/entrypoint-validation.sh` passes an explicit
+`--modules` list that overrides the `config.py` defaults and never listed the new
+module (the tiny-loop passes `--modules` explicitly, which is why it saw the
+solves and the full scan didn't); and once fixed, the commit sat **unpushed**
+while CodeBuild builds from the *remote* branch. Lesson recorded: enabling a new
+module means updating the entrypoint `--modules` lists, and a branch must be
+pushed before `run-agent-task.sh` will build the change.
+
+---
+
 ## Iteration 5 — Input Validation module + SPA body capture (2026-07-02) ✓ MERGED
 
 **Solve rate: 7.1% → 9.7% (8/113 → 11/113, +3)**  |  Findings: 214 (14 critical, 30 high)
