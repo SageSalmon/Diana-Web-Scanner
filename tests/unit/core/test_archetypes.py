@@ -66,6 +66,21 @@ def test_dedupes_per_archetype_and_url():
     assert len(tags) == 1
 
 
+def test_matches_pluralised_collection_segment():
+    # A REST collection pluralises the resource noun; the singular lexicon term
+    # must still match. Framework-agnostic: same for /reviews, /feedbacks, etc.
+    for path in ("http://x/api/feedbacks/1", "http://x/reviews", "http://x/votes"):
+        tags = profile_capabilities([_ep(path, "GET", parameters={"id": "1"})])
+        assert any(t.archetype == "rating" for t in tags), path
+
+
+def test_stemming_does_not_overmatch_short_words():
+    # A short word ending in 's' that is not a plural must not be truncated into
+    # a spurious lexicon hit.
+    tags = profile_capabilities([_ep("http://x/gas", "GET", parameters={"q": "1"})])
+    assert tags == []
+
+
 # ---------------------------------------------------------------------------
 # Synthesis specs
 # ---------------------------------------------------------------------------

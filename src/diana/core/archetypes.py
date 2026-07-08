@@ -108,6 +108,22 @@ REGISTRY: tuple[Archetype, ...] = (
 )
 
 
+def _stem(token: str) -> str:
+    """Cheap depluralisation so a lexicon term matches a collection segment.
+
+    REST collections are conventionally pluralised (``/reviews``, ``/feedbacks``,
+    ``/accounts``), while a class lexicon is most naturally written in the
+    singular. Stemming both sides makes the match symmetric and framework
+    agnostic — it is not tuned to any target's nouns. Guarded on length so short
+    words that legitimately end in ``s`` are left intact.
+    """
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"  # "categories" -> "category"
+    if token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+        return token[:-1]        # "reviews" -> "review", "feedbacks" -> "feedback"
+    return token
+
+
 def _segments(url: str) -> list[str]:
     return [s.lower() for s in urlsplit(url).path.split("/") if s]
 
@@ -129,8 +145,8 @@ def _matches(archetype: Archetype, endpoint: Any) -> tuple[int, tuple[str, ...]]
     one more. Keeps detection semantic (name/field vocabulary), never keyed on a
     literal path.
     """
-    segs = set(_segments(endpoint.url))
-    resource_hit = any(term in segs for term in archetype.resource_lexicon)
+    segs = {_stem(s) for s in _segments(endpoint.url)}
+    resource_hit = any(_stem(term) in segs for term in archetype.resource_lexicon)
     fields = _fields_of(endpoint)
     matched = tuple(t for t in archetype.field_lexicon if t in fields)
     signals = (1 if resource_hit else 0) + len(matched)

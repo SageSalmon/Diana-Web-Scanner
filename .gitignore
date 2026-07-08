@@ -45,3 +45,4 @@ tf/**/terraform.tfvars
 tf/**/backend.hcl
 tf/**/crash.log
 agent-results/
+.playwright-mcp/
