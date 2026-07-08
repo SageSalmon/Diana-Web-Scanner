@@ -25,11 +25,16 @@ reports/
 .env.local
 
 # Claude Code
-**/.claude/
+# Ignore .claude CONTENTS (not the dir itself) so git still descends and the
+# re-includes below take effect — a trailing-slash `**/.claude/` blocks descent
+# and silently defeats every negation under it.
+**/.claude/*
 !**/.claude/commands/
-!**/.claude/commands/*.md
+!**/.claude/commands/**
 !**/.claude/skills/
 !**/.claude/skills/**
+!**/.claude/agents/
+!**/.claude/agents/**
 
 # OS
 .DS_Store

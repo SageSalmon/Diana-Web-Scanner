@@ -2,11 +2,18 @@
 name: agent-orchestrator
 description: Run the full agent team iteration loop — from baseline validation through merge decision
 user_invocable: true
+recommended_model: opus
 ---
 
 # Orchestrator
 
 Run the full iteration loop as defined in the Agent Team Plan. Manages the handoff chain, enforces gate ordering, and tracks progress.
+
+> **Model:** run inline on the session's top-tier model (Opus) — this role drives
+> the loop's judgement calls and gate ordering. The mechanical sub-roles it hands
+> off to (validation/tinyloop/test-runner/benchmark → Haiku; generality/test-author/
+> test-critic → Sonnet) should be **dispatched as subagents** via the matching
+> `.claude/agents/*.md` definitions so each runs on its cheaper tier.
 
 ## Arguments
 

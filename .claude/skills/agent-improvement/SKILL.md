@@ -2,11 +2,15 @@
 name: agent-improvement
 description: Analyze gap analysis from Validation Agent and implement one scanner improvement per iteration
 user_invocable: true
+recommended_model: opus
 ---
 
 # Improvement Agent
 
 Read the gap analysis from the Validation Agent, select the highest-impact generic improvement, and implement it on a feature branch.
+
+> **Model:** run inline on the session's top-tier model (Opus). This is the one
+> role doing hard novel design + scanner implementation — do not downgrade it.
 
 ## Arguments
 
