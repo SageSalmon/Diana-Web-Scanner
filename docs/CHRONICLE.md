@@ -1,5 +1,63 @@
 # Diana Agent Team — Chronicle
 
+## Iteration 7 — Archetype capability profiler (P0) (2026-07-07) ✓ MERGED
+
+**Solve rate: 14.2% → 15.9% (16/113 → 18/113, +2 net)**  |  Findings: 229 (3 critical, 36 high)
+**Cost: ~$0.20 Fargate (Bedrock tokens not captured)**  |  Cumulative: ~$6
+
+Added a lightweight **capability-profiler** phase between crawl and dispatch
+(`src/diana/core/archetypes.py`). It recognises *what kind of app* is under test
+from cheap read-side signals — resource nouns in discovered URLs plus the fields
+carried by params/bodies — and tags "no-journey" archetypes (`rating`,
+`account_registration`). Each tag emits generic **probe specs** that the existing
+`input_validation` module executes as *active synthesis*: it constructs and
+submits abusive bodies (empty required credential, duplicate identity,
+out-of-range score) even when the SPA crawl captured no write XHR for that
+resource. Everything domain-specific lives in one auditable `REGISTRY`; the
+lexicons are broad class vocabularies (a rating is stars/score/grade in any app),
+never target nouns. Generality PASS.
+
+**Why active synthesis:** `input_validation` was starved — the crawl captured
+only ~2 write bodies, so replay-and-mutate had almost nothing to chew on. The
+profiler's value is *constructing* the probe body from generic field defaults,
+not replaying a captured one.
+
+**Two net solves, both causally attributable to the registration archetype:**
+- *Empty User Registration* (d2) — the `empty_required` probe (submit blank
+  credentials to a registration surface).
+- *Repetitive Registration* (d1) — **recovered.** Iteration 6 lost it to
+  scoreboard-race flakiness; the `duplicate` probe POSTs the same synthetic
+  identity twice *deterministically*, so the solve is robust rather than
+  incidental.
+
+**Full-run profile:** `account_registration×12, rating×3 (27 active probes)`.
+
+**Design choice — no `models.py` change:** archetype tags are computed in-memory
+in the orchestrator off the cached sitemap, not persisted to the crawl model, so
+the tiny-loop cached-crawl shortcut stays valid for future profiler work.
+
+**The plural-lexicon defect the tiny-loop exposed:** the first tiny-loop tagged
+only `account_registration` — the `rating` archetype never fired despite
+`/api/Feedbacks` being crawled, because the segment is *pluralised*
+(`feedbacks`) while the lexicon term is singular (`feedback`). Fixed with generic
+singular/plural stemming (`_stem`, applied symmetrically to segments and lexicon
+terms, length-guarded, `-ies`→`-y`), which brought `rating×3` to life in the full
+run. This is a real generality win — the archetype now matches any REST
+collection's pluralised noun (`reviews`, `comments`, `votes`), not just one
+target's.
+
+**Honest miss — Zero Stars (d1):** stays unsolved. The `rating` archetype now
+fires, but the rating POST is CAPTCHA-gated; solving it generically would require
+a CAPTCHA-solving capability that is out of P0 scope and risks target-specific
+logic. Left unsolved rather than special-cased.
+
+**Zero regressions:** all 16 prior solves retained; 29 profiler/input-validation
+unit tests pass. Validated by full `agent-validation` (long loop, 6285s) rather
+than the tiny-loop, because the merge gate needs the whole challenge set to
+measure the true delta and confirm no regressions.
+
+---
+
 ## Iteration 0 — Baseline (2026-06-06)
 
 **Solve rate: 6.2% (7/112)**  |  Duration: 1708s  |  Tests: 0
