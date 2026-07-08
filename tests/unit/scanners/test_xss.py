@@ -264,6 +264,133 @@ class TestPayloadReflectionDetection:
 
 
 # ---------------------------------------------------------------------------
+# Path-parameter injection — reflected XSS via RESTful path segments
+# ---------------------------------------------------------------------------
+
+class TestPathParameterInjection:
+    """A param whose value is a path segment must be injected into the path,
+    not only appended as an (ignored) query string. Generic to any REST app
+    that reflects a path id/slug (e.g. /track-order/{id}, /product/{slug})."""
+
+    def test_inject_into_path_replaces_matching_segment(self):
+        out = XSSScanner._inject_into_path(
+            "http://app/api/orders/1", "1", '<svg onload=alert(1)>'
+        )
+        # The '1' segment is replaced with the URL-encoded payload; the rest of
+        # the path is preserved.
+        assert out is not None
+        assert out.startswith("http://app/api/orders/")
+        assert "/orders/1" not in out
+        assert "%3Csvg" in out  # '<' url-encoded into the path
+
+    def test_inject_into_path_none_when_value_not_a_segment(self):
+        # 'test' is a query value, not a path segment — nothing to inject.
+        assert XSSScanner._inject_into_path("http://app/search", "test", "X") is None
+
+    def test_inject_into_path_none_for_empty_value(self):
+        assert XSSScanner._inject_into_path("http://app/x/1", "", "X") is None
+
+    def test_inject_into_path_only_first_matching_segment(self):
+        # Value appears twice; only the first segment is substituted so the URL
+        # stays well-formed.
+        out = XSSScanner._inject_into_path("http://app/1/1", "1", "P")
+        assert out == "http://app/P/1"
+
+    def test_injection_requests_includes_path_for_path_id_endpoint(self, sample_endpoint):
+        ep = sample_endpoint(url="http://app/track-order/1", parameters={"id": "1"})
+        scanner = XSSScanner(http=None, ai_agent=None)
+        reqs = scanner._injection_requests(ep, "id", "PAYLOAD")
+        locations = {loc for loc, _url, _data in reqs}
+        assert locations == {"query", "path"}
+        path_url = next(url for loc, url, _ in reqs if loc == "path")
+        assert "track-order/PAYLOAD" in path_url
+
+    def test_injection_requests_query_only_for_search_param(self, sample_endpoint):
+        ep = sample_endpoint(url="http://app/search", parameters={"q": "test"})
+        scanner = XSSScanner(http=None, ai_agent=None)
+        reqs = scanner._injection_requests(ep, "q", "PAYLOAD")
+        assert [loc for loc, _u, _d in reqs] == ["query"]
+
+    def test_injection_requests_post_uses_body(self, sample_endpoint):
+        ep = sample_endpoint(url="http://app/feedback", method="POST",
+                             parameters={"comment": "hi"})
+        scanner = XSSScanner(http=None, ai_agent=None)
+        reqs = scanner._injection_requests(ep, "comment", "PAYLOAD")
+        assert len(reqs) == 1
+        loc, url, data = reqs[0]
+        assert loc == "body" and url == "http://app/feedback"
+        assert data == {"comment": "PAYLOAD"}
+
+    @pytest.mark.asyncio
+    async def test_detects_reflected_xss_via_path_segment(self, mock_http_client, sample_endpoint):
+        """Payload injected into a path segment and reflected back is detected,
+        and the finding records that it came from the path (not the query)."""
+        ep = sample_endpoint(url="http://app/track-order/1", parameters={"id": "1"})
+
+        async def reflecting_get(url, **kwargs):
+            from urllib.parse import unquote, urlsplit
+            last_seg = unquote(urlsplit(url).path.rsplit("/", 1)[-1])
+            # Server echoes the path id verbatim into a JSON body.
+            return MockResponse(text=f'{{"orderId":"{last_seg}","status":"ok"}}')
+
+        scanner = _make_scanner(mock_http_client)
+        scanner.http.get = reflecting_get
+
+        payload = Payload(value='<iframe src="javascript:alert(`xss`)">',
+                          vuln_type=VulnType.XSS_REFLECTED)
+        finding = await scanner._test_payload(ep, payload)
+
+        assert finding is not None
+        assert "(path)" in finding.title
+
+    @pytest.mark.asyncio
+    async def test_canonical_payload_sent_verbatim(self, mock_http_client, sample_endpoint):
+        """Canonical payloads (no marker) must not be mutated — the exact vector
+        has to reach the server to exercise its output encoding."""
+        ep = sample_endpoint(url="http://app/track-order/1", parameters={"id": "1"})
+        seen = []
+
+        async def tracking_get(url, **kwargs):
+            from urllib.parse import unquote
+            seen.append(unquote(url))
+            return MockResponse(text="<html></html>")
+
+        scanner = _make_scanner(mock_http_client)
+        scanner.http.get = tracking_get
+
+        payload = Payload(value='<iframe src="javascript:alert(`xss`)">',
+                          vuln_type=VulnType.XSS_REFLECTED)
+        await scanner._test_payload(ep, payload)
+
+        # The exact payload appears verbatim in at least one request (path form).
+        assert any('<iframe src="javascript:alert(`xss`)">' in u for u in seen)
+
+    @pytest.mark.asyncio
+    async def test_no_false_positive_from_surrounding_page_markup(self, mock_http_client, sample_endpoint):
+        """Canary reflected but fully encoded, surrounded by the page's own
+        markup, must NOT be reported (regression for the ±window bleed bug)."""
+        ep = sample_endpoint(url="http://app/search", parameters={"q": "test"})
+
+        async def encoding_get(url, **kwargs):
+            from urllib.parse import parse_qs, urlparse
+            val = parse_qs(urlparse(url).query).get("q", [""])[0]
+            enc = (val.replace("&", "&amp;").replace("<", "&lt;")
+                      .replace(">", "&gt;").replace('"', "&quot;"))
+            # Reflection sits inside real page markup with plenty of raw '<'.
+            return MockResponse(
+                text=f'<html><body><div class="results">{enc}</div></body></html>'
+            )
+
+        scanner = _make_scanner(mock_http_client)
+        scanner.http.get = encoding_get
+
+        payload = Payload(value='<script>alert("diana")</script>',
+                          vuln_type=VulnType.XSS_REFLECTED)
+        finding = await scanner._test_payload(ep, payload)
+        assert finding is None
+
+
+# ---------------------------------------------------------------------------
 # _test_dom_xss_sinks — DOM-based XSS detection via source/sink analysis
 # ---------------------------------------------------------------------------
 
