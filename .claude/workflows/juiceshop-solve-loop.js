@@ -20,12 +20,15 @@ if (TARGET_PCT === null) {
   throw new Error('juiceshop-solve-loop requires args.targetPct (e.g. { targetPct: 30 }). Refusing to run without a target.')
 }
 const AUDITORS = (args && args.auditorsPerRound) || 3
-// Default is ONE round per invocation, so the assistant checks in at every round
-// boundary (report the new absolute %, then launch the next round while it keeps
-// improving and stays below target). Pass maxRounds:N for unattended multi-round
-// churn instead.
-const MAX_ROUNDS = (args && args.maxRounds) || 1
-const DRY_LIMIT = (args && args.dryRoundLimit) || 1          // stop after this many no-net-gain rounds (checkin)
+// One workflow run executes up to MAX_ROUNDS rounds, stopping early only when the
+// absolute % target is reached (or the token budget runs low). Improving rounds
+// direct-auto-merge to main and the loop continues on the fresh state; the
+// per-round checkin is the CHRONICLE update + log line (watch /workflows live).
+const MAX_ROUNDS = (args && args.maxRounds) || 5
+// A no-gain round does NOT stop the run — it tries fresh opportunities next round
+// up to the round cap. Default disables the dry early-stop; pass dryRoundLimit:N
+// to opt into stopping after N consecutive no-gain rounds.
+const DRY_LIMIT = (args && args.dryRoundLimit) || MAX_ROUNDS
 const MODULE_HINT = (args && args.modules) || null           // optional explicit module list
 const TOTAL = 113
 const CRAWLER_SET = ['src/diana/core/crawler.py', 'src/diana/core/spa_crawler.py', 'src/diana/core/models.py']
