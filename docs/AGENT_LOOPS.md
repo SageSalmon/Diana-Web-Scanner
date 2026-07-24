@@ -5,8 +5,16 @@ validation-to-merge) and the **short loop** (the tiny loop), why each exists,
 and the personas that run them.
 
 > Companion docs: [AGENT_TEAM_PLAN.md](AGENT_TEAM_PLAN.md) (design),
-> [CHRONICLE.md](CHRONICLE.md) (iteration history). This doc is about the
-> *process* — the loops and the agents that walk them.
+> [CHRONICLE.md](CHRONICLE.md) (iteration history),
+> [AGENTIC_SDLC.md](AGENTIC_SDLC.md) (the autonomous parallel-auditor loop). This
+> doc is about the *process* — the loops and the agents that walk them.
+
+> **Fully autonomous mode:** the two loops below are the manual/interactive
+> primitives. [AGENTIC_SDLC.md](AGENTIC_SDLC.md) composes them into a hands-off
+> workflow (`.claude/workflows/juiceshop-solve-loop.js`): each round runs K short
+> loops in parallel (one per module, isolated AWS sandboxes), integrates the
+> winners, runs one long loop as the merge gate, auto-merges, and repeats toward
+> an absolute solve-rate % target — then tears the sandbox down.
 
 ---
 

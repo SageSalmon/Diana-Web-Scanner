@@ -16,39 +16,42 @@ Implemented as `.claude/workflows/juiceshop-solve-loop.js`.
 
 ## Round lifecycle
 
-One round runs autonomously; the operator is touched only at the checkin (and on
-escalation). The loop repeats until the absolute % target is reached.
+One workflow run executes **up to 5 rounds**, looping until the absolute %
+target is reached or the cap is hit, then tears the AWS sandbox down. Each round
+runs autonomously; improving rounds direct-auto-merge to `main` and the loop
+continues on the fresh state. A no-gain or regressing round simply doesn't merge
+and the run moves on to fresh opportunities next round.
 
 ```mermaid
 flowchart TB
-  op(["Operator sets absolute % target"]) --> prep
+  op(["Operator: loop to N% (up to 5 rounds)"]) --> prep
   prep["Prep: verify infra, read baseline solved %"] --> plan
   plan["Plan agent: pick K module-disjoint opportunities"] --> auditors
   auditors["K parallel auditors — see fan-out diagram"] --> flip
 
   flip{"any auditor flipped a target?"}
-  flip -- no --> escNoGain(["Escalate: no-gain round"])
+  flip -- no --> roundEnd
   flip -- yes --> integ
   integ["Integrate green branches, run unit suite"] --> big
   big["Big scan: full validation, all modules, fresh crawl"] --> ok
   ok{"solved count up AND zero regressions?"}
-  ok -- no --> hold(["Hold integration branch, escalate"])
-  ok -- yes --> land
-  land["Direct auto-merge to main (admin bypass)"] --> checkin
-  checkin[["CHECKIN: update main + CHRONICLE, report new absolute %"]]
-  checkin --> tgt
-  tgt{"reached target %?"}
-  tgt -- no --> plan
-  tgt -- yes --> done(["Target reached"])
+  ok -- no --> roundEnd
+  ok -- yes --> land["Direct auto-merge to main + CHRONICLE checkin"]
+  land --> roundEnd
+
+  roundEnd{"target % reached OR 5 rounds done?"}
+  roundEnd -- "no, keep going" --> plan
+  roundEnd -- "yes" --> teardown["Teardown: terraform destroy the sandbox"]
+  teardown --> done(["Run complete — report final absolute %"])
 
   classDef agent fill:#1f6feb,stroke:#0b3d91,color:#fff;
   classDef aws fill:#b45309,stroke:#7c2d12,color:#fff;
   classDef gate fill:#6b7280,stroke:#374151,color:#fff;
   classDef human fill:#059669,stroke:#065f46,color:#fff;
   class plan agent;
-  class big aws;
-  class flip,ok,tgt gate;
-  class op,checkin,done,escNoGain,hold human;
+  class big,teardown aws;
+  class flip,ok,roundEnd gate;
+  class op,land,done human;
 ```
 
 ## Auditor fan-out (inside one round)
@@ -146,5 +149,9 @@ Workflow({ name: 'juiceshop-solve-loop', args: { targetPct: 25 } })
 - `auditorsPerRound` (default 3), `maxRounds` (default 5), `modules` (optional
   module allow-list), `dryRoundLimit` (default = maxRounds; set lower to stop
   after N consecutive no-gain rounds).
+- `teardown` (default true) — `terraform destroy` the AWS sandbox at the end of
+  the run. Pass `false` to leave infra up (to inspect results or chain runs).
 
-Requires AWS infra up first (the run aborts cleanly if it isn't).
+Requires AWS infra up first (the run aborts cleanly if it isn't). All merges are
+pushed to origin before teardown, so nothing is lost when the sandbox is
+destroyed.

@@ -10,6 +10,7 @@ export const meta = {
     { title: 'Tinyloop', detail: 'parallel single-module scans, each on its own Juice Shop sidecar' },
     { title: 'Integrate', detail: 'merge the green branches' },
     { title: 'BigScan', detail: 'one full validation; auto-merge to main if score rose with no regressions' },
+    { title: 'Teardown', detail: 'terraform destroy the AWS sandbox at the end of the run' },
   ],
 }
 
@@ -29,6 +30,9 @@ const MAX_ROUNDS = (args && args.maxRounds) || 5
 // up to the round cap. Default disables the dry early-stop; pass dryRoundLimit:N
 // to opt into stopping after N consecutive no-gain rounds.
 const DRY_LIMIT = (args && args.dryRoundLimit) || MAX_ROUNDS
+// Tear the AWS sandbox down when the run finishes (default on). Pass
+// teardown:false to leave infra up (e.g. to inspect results or chain runs).
+const TEARDOWN = !(args && args.teardown === false)
 const MODULE_HINT = (args && args.modules) || null           // optional explicit module list
 const TOTAL = 113
 const CRAWLER_SET = ['src/diana/core/crawler.py', 'src/diana/core/spa_crawler.py', 'src/diana/core/models.py']
@@ -118,6 +122,11 @@ const MERGE_SCHEMA = {
   type: 'object', additionalProperties: false,
   required: ['merged', 'detail'],
   properties: { merged: { type: 'boolean' }, detail: { type: 'string' } },
+}
+const TEARDOWN_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['ok', 'detail'],
+  properties: { ok: { type: 'boolean' }, detail: { type: 'string' } },
 }
 
 // ---- One auditor: improve -> gates -> tiny-loop ----------------------------
@@ -261,9 +270,25 @@ Report challenges_solved, the newly_solved list vs a baseline of ${solved}, and 
 
 const hitTarget = pct(solved) >= TARGET_PCT
 log(`DONE after ${round} round(s). ${startSolved} -> ${solved}/${TOTAL} (${pct(solved)}%). Target ${TARGET_PCT}% ${hitTarget ? 'REACHED' : 'not reached'}.`)
+
+// Teardown — always tear the AWS sandbox down at the end of a run so the meter
+// stops. Runs after any auto-merges are already pushed to origin. Skipped only
+// if the operator passed teardown:false. (Infra-down abort returns earlier, so
+// there is nothing to tear down in that path.)
+let teardown = null
+if (TEARDOWN) {
+  phase('Teardown')
+  teardown = await agent(
+    `Tear down the AWS dev sandbox now that the solve-loop run is complete. Run \`terraform -chdir=tf/environments/dev destroy -input=false -auto-approve\` and confirm it prints "Destroy complete". All merges are already pushed to origin, so nothing is lost. Report ok=true only if destroy completed cleanly; otherwise ok=false with the error.`,
+    { label: 'teardown', phase: 'Teardown', schema: TEARDOWN_SCHEMA },
+  )
+  log(teardown && teardown.ok ? `Teardown complete: ${teardown.detail}` : `TEARDOWN MAY HAVE FAILED — check AWS manually: ${teardown ? teardown.detail : 'agent failed'}`)
+}
+
 return {
   hitTarget, targetPct: TARGET_PCT,
   startSolved, finalSolved: solved, finalPct: pct(solved),
   roundsRun: round, merges,
+  teardown: teardown ? teardown.ok : 'skipped',
   stoppedBecause: hitTarget ? 'target-reached' : (round >= MAX_ROUNDS ? 'max-rounds' : (dry >= DRY_LIMIT ? 'dry-rounds' : 'budget')),
 }
