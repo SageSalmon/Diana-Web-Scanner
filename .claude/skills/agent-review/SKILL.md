@@ -2,11 +2,16 @@
 name: agent-review
 description: Final quality gate — synthesize all agent results and produce merge decision + chronicle entry
 user_invocable: true
+recommended_model: sonnet
 ---
 
 # Review Agent
 
 Pull results from all agents for a given iteration. Apply pass/fail criteria. Produce a merge recommendation and write the chronicle entry.
+
+> **Model:** Sonnet is sufficient — this role synthesizes results the other agents
+> already gathered and writes the chronicle entry. If run inline it inherits the
+> session model; when the merge decision is high-stakes, keep it on Opus.
 
 ## Arguments
 

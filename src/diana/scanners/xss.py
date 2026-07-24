@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 from diana.config import ScanConfig
 from diana.core.models import (
@@ -17,7 +17,14 @@ from diana.core.models import (
 )
 from diana.scanners.base import BaseScanner
 
-# Static payloads for non-AI mode or as a baseline
+# Static payloads for non-AI mode or as a baseline.
+#
+# Two families:
+#  - Marker payloads carry the "diana" token, swapped per-request for a unique
+#    canary so a reflection is attributable to THIS request (low false-positive).
+#  - Canonical breakout payloads (no marker) are standard OWASP XSS vectors sent
+#    verbatim to see whether the app's output encoding neutralises them. These
+#    are generic filter-evasion vectors, not tuned to any target's markup.
 STATIC_XSS_PAYLOADS = [
     '<script>alert("diana")</script>',
     '"><script>alert("diana")</script>',
@@ -28,6 +35,9 @@ STATIC_XSS_PAYLOADS = [
     "${7*7}",
     "<svg onload=alert('diana')>",
     "javascript:alert('diana')",
+    # Canonical breakout vectors (verbatim, no marker).
+    '<iframe src="javascript:alert(`xss`)">',
+    '<body onload=alert(`xss`)>',
 ]
 
 # Unique canary for reflection detection
@@ -145,91 +155,167 @@ class XSSScanner(BaseScanner):
         endpoint: Endpoint,
         payload: Payload,
     ) -> Finding | None:
-        """Inject payload into each parameter and check for reflection."""
+        """Inject payload into each parameter and check for reflection.
+
+        A parameter is injected in every location it can occupy: the query
+        string, and — when its recorded value is also a discrete path segment
+        of the URL — the path itself. RESTful apps commonly reflect a path id
+        (``/track-order/{id}``, ``/product/{slug}``) straight back into the
+        response, so query-only injection misses a whole class of reflected XSS.
+        """
         for param_name in endpoint.parameters:
-            canary = f"{CANARY_PREFIX}{uuid.uuid4().hex[:8]}"
-
-            # Insert canary into payload — replace "diana" if present,
-            # otherwise prepend canary so we can detect reflection
-            if "diana" in payload.value:
-                test_value = payload.value.replace("diana", canary)
+            # Marker payloads carry the "diana" token; swap in a unique canary so
+            # a reflection is attributable to THIS request. Canonical payloads
+            # (no marker) are sent verbatim — mutating them would corrupt the
+            # breakout syntax and defeat the test.
+            if CANARY_PREFIX in payload.value:
+                canary: str | None = f"{CANARY_PREFIX}{uuid.uuid4().hex[:8]}"
+                test_value = payload.value.replace(CANARY_PREFIX, canary)
             else:
-                test_value = payload.value.replace("alert(", f"alert('{canary}',")
-                if test_value == payload.value:
-                    # Payload doesn't contain alert() either — just use raw payload
-                    # and check for its literal presence
-                    test_value = payload.value
-                    canary = payload.value[:20]  # Use start of payload as marker
+                canary = None
+                test_value = payload.value
 
-            test_params = dict(endpoint.parameters)
-            test_params[param_name] = test_value
+            for location, url, data in self._injection_requests(
+                endpoint, param_name, test_value
+            ):
+                try:
+                    if data is None:
+                        response = await self.http.get(url)
+                    else:
+                        response = await self.http.post(url, data=data)
+                except Exception:
+                    continue
 
-            try:
-                if endpoint.method.upper() == "GET":
-                    # Strip existing query string, rebuild with test params
-                    base_url = endpoint.url.split("?")[0]
-                    url = f"{base_url}?{urlencode(test_params)}"
-                    response = await self.http.get(url)
-                else:
-                    response = await self.http.post(endpoint.url, data=test_params)
-            except Exception:
-                continue
+                body = response.text
+                if not body:
+                    continue
 
-            body = response.text
-            if not body:
-                continue
-
-            # Check for reflection — multiple detection strategies
-            reflected = False
-            evidence_detail = ""
-
-            if test_value in body:
-                # Full payload reflected unencoded — confirmed XSS
-                reflected = True
-                evidence_detail = "Full payload reflected without encoding"
-            elif canary in body:
-                # Canary reflected — check if in a dangerous context
-                # Look for canary inside HTML tags, attributes, or script blocks
-                canary_idx = body.find(canary)
-                surrounding = body[max(0, canary_idx - 50):canary_idx + len(canary) + 50]
-                # Check for dangerous contexts: inside tags, event handlers, script
-                dangerous_patterns = ["<script", "onerror=", "onload=", "onfocus=",
-                                      "onclick=", "onmouseover=", "javascript:",
-                                      "<iframe", "<svg", "<img"]
-                for pattern in dangerous_patterns:
-                    if pattern in surrounding.lower():
-                        reflected = True
-                        evidence_detail = f"Canary in dangerous context near '{pattern}'"
-                        break
-                if not reflected:
-                    # Canary is reflected but may be encoded — still worth reporting
-                    # if any HTML special chars from our payload survived
-                    html_chars = ["<", ">", '"', "'", "javascript:"]
-                    for char in html_chars:
-                        if char in payload.value and char in surrounding:
-                            reflected = True
-                            evidence_detail = f"HTML char '{char}' unencoded near reflected canary"
-                            break
-
-            if reflected:
-                return Finding(
-                    id=f"XSS-{uuid.uuid4().hex[:8]}",
-                    vuln_type=VulnType.XSS_REFLECTED,
-                    severity=Severity.HIGH,
-                    title=f"Reflected XSS in {param_name} at {endpoint.url}",
-                    description=(
-                        f"The parameter '{param_name}' reflects user input "
-                        f"without proper encoding or sanitization. "
-                        f"{evidence_detail}."
-                    ),
-                    endpoint=endpoint,
-                    evidence=body[:500],
-                    payload_used=test_value,
-                    cwe_id="CWE-79",
-                    remediation="Encode all user input before reflecting in HTML output.",
+                reflected, evidence_detail = self._detect_reflection(
+                    body, test_value, canary, payload
                 )
+                if reflected:
+                    return Finding(
+                        id=f"XSS-{uuid.uuid4().hex[:8]}",
+                        vuln_type=VulnType.XSS_REFLECTED,
+                        severity=Severity.HIGH,
+                        title=(
+                            f"Reflected XSS in {param_name} ({location}) "
+                            f"at {endpoint.url}"
+                        ),
+                        description=(
+                            f"The parameter '{param_name}' reflects user input "
+                            f"in the {location} without proper encoding or "
+                            f"sanitization. {evidence_detail}."
+                        ),
+                        endpoint=endpoint,
+                        evidence=body[:500],
+                        payload_used=test_value,
+                        cwe_id="CWE-79",
+                        remediation=(
+                            "Encode all user input before reflecting in HTML "
+                            "output."
+                        ),
+                    )
 
         return None
+
+    def _injection_requests(
+        self,
+        endpoint: Endpoint,
+        param_name: str,
+        test_value: str,
+    ) -> list[tuple[str, str, dict | None]]:
+        """Enumerate (location, url, post_data) request specs for one param.
+
+        ``post_data`` is None for GET (payload rides in ``url``) and a params
+        dict for other methods. Path injection is emitted only when the param's
+        original value is a standalone path segment, so it stays generic —
+        keyed on the value's position, never on a hardcoded route.
+        """
+        test_params = dict(endpoint.parameters)
+        test_params[param_name] = test_value
+
+        if endpoint.method.upper() != "GET":
+            return [("body", endpoint.url, test_params)]
+
+        base_url = endpoint.url.split("?")[0]
+        requests: list[tuple[str, str, dict | None]] = [
+            ("query", f"{base_url}?{urlencode(test_params)}", None),
+        ]
+        orig_value = str(endpoint.parameters.get(param_name, ""))
+        path_url = self._inject_into_path(base_url, orig_value, test_value)
+        if path_url:
+            requests.append(("path", path_url, None))
+        return requests
+
+    @staticmethod
+    def _inject_into_path(
+        url: str,
+        orig_value: str,
+        test_value: str,
+    ) -> str | None:
+        """Substitute ``test_value`` into the path segment equal to ``orig_value``.
+
+        Returns None when the value is not a discrete path segment, so nothing
+        is injected into apps that only carry the param in the query string.
+        """
+        if not orig_value:
+            return None
+        parts = urlsplit(url)
+        segments = parts.path.split("/")
+        replaced = False
+        new_segments: list[str] = []
+        for seg in segments:
+            if not replaced and seg and seg == orig_value:
+                new_segments.append(quote(test_value, safe=""))
+                replaced = True
+            else:
+                new_segments.append(seg)
+        if not replaced:
+            return None
+        new_path = "/".join(new_segments)
+        return urlunsplit((parts.scheme, parts.netloc, new_path, "", ""))
+
+    # HTML/JS breakout characters whose survival turns a reflection into XSS.
+    _BREAKOUT_CHARS = set("<>\"'`")
+
+    @classmethod
+    def _detect_reflection(
+        cls,
+        body: str,
+        test_value: str,
+        canary: str | None,
+        payload: Payload,
+    ) -> tuple[bool, str]:
+        """Decide whether a response reflects the injected payload dangerously.
+
+        Two signals, strongest first:
+          1. The whole payload survives verbatim (query-encoded round-trip or the
+             raw canonical vector) — an unambiguous reflection.
+          2. The unique canary is reflected AND a breakout character the payload
+             placed *immediately adjacent* to it survived unencoded. Checking
+             only the direct neighbours — not a wide window — avoids matching the
+             page's own structural markup, which is a common false positive.
+        """
+        if test_value in body or payload.value in body:
+            return True, "Full payload reflected without encoding"
+        if canary and canary in body:
+            end = len(canary)
+            t_idx = test_value.find(canary)
+            b_idx = body.find(canary)
+            neighbours = (
+                (test_value[t_idx - 1] if t_idx > 0 else "",
+                 body[b_idx - 1] if b_idx > 0 else ""),
+                (test_value[t_idx + end] if t_idx + end < len(test_value) else "",
+                 body[b_idx + end] if b_idx + end < len(body) else ""),
+            )
+            for payload_char, body_char in neighbours:
+                if (payload_char in cls._BREAKOUT_CHARS
+                        and body_char == payload_char):
+                    return True, (
+                        f"Unencoded '{payload_char}' adjacent to reflected canary"
+                    )
+        return False, ""
 
     async def _test_dom_xss_sinks(self, base_url: str, work_items: list) -> list[Finding]:
         """Detect DOM XSS by checking for dangerous JavaScript sink patterns.
