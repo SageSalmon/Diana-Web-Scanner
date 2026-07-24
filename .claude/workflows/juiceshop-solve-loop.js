@@ -16,24 +16,31 @@ export const meta = {
 
 // ---- Inputs (args) ---------------------------------------------------------
 // args = { targetPct, auditorsPerRound?, maxRounds?, modules?, dryRoundLimit? }
-const TARGET_PCT = (args && typeof args.targetPct === 'number') ? args.targetPct : null
+// Normalize: args may arrive as an object, or as a JSON-encoded string. Coerce
+// numerics with Number() so a string like "22" is accepted.
+let A = args
+if (typeof A === 'string') { try { A = JSON.parse(A) } catch (e) { A = {} } }
+A = A || {}
+const numArg = (v) => (v != null && v !== '' && !isNaN(Number(v))) ? Number(v) : null
+
+const TARGET_PCT = numArg(A.targetPct)
 if (TARGET_PCT === null) {
-  throw new Error('juiceshop-solve-loop requires args.targetPct (e.g. { targetPct: 30 }). Refusing to run without a target.')
+  throw new Error('juiceshop-solve-loop requires args.targetPct (e.g. { targetPct: 22 }). Refusing to run without a target.')
 }
-const AUDITORS = (args && args.auditorsPerRound) || 3
+const AUDITORS = numArg(A.auditorsPerRound) || 3
 // One workflow run executes up to MAX_ROUNDS rounds, stopping early only when the
 // absolute % target is reached (or the token budget runs low). Improving rounds
 // direct-auto-merge to main and the loop continues on the fresh state; the
 // per-round checkin is the CHRONICLE update + log line (watch /workflows live).
-const MAX_ROUNDS = (args && args.maxRounds) || 5
+const MAX_ROUNDS = numArg(A.maxRounds) || 5
 // A no-gain round does NOT stop the run — it tries fresh opportunities next round
 // up to the round cap. Default disables the dry early-stop; pass dryRoundLimit:N
 // to opt into stopping after N consecutive no-gain rounds.
-const DRY_LIMIT = (args && args.dryRoundLimit) || MAX_ROUNDS
+const DRY_LIMIT = numArg(A.dryRoundLimit) || MAX_ROUNDS
 // Tear the AWS sandbox down when the run finishes (default on). Pass
 // teardown:false to leave infra up (e.g. to inspect results or chain runs).
-const TEARDOWN = !(args && args.teardown === false)
-const MODULE_HINT = (args && args.modules) || null           // optional explicit module list
+const TEARDOWN = !(A.teardown === false)
+const MODULE_HINT = A.modules || null                        // optional explicit module list
 const TOTAL = 113
 const CRAWLER_SET = ['src/diana/core/crawler.py', 'src/diana/core/spa_crawler.py', 'src/diana/core/models.py']
 
