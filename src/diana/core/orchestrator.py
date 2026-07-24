@@ -366,9 +366,18 @@ class ScanOrchestrator:
                     print(f"  Playwright found {len(spa_endpoints)} rendered endpoints")
                     sitemap.endpoints.extend(spa_endpoints)
 
+                # Harvest every query-param name observed across the crawl so the
+                # DOM-XSS sweep probes the app's real reflection keys, not just a
+                # hardcoded default. Generic — names come from observed traffic.
+                observed_params: set[str] = set()
+                for ep in sitemap.endpoints:
+                    observed_params.update(ep.parameters.keys())
+
                 # Test DOM XSS with real browser execution
                 dom_xss_findings = await asyncio.to_thread(
-                    lambda: asyncio.run(spa.test_dom_xss(self.config.target, spa_routes))
+                    lambda: asyncio.run(
+                        spa.test_dom_xss(self.config.target, spa_routes, observed_params)
+                    )
                 )
                 if dom_xss_findings:
                     print(f"  Playwright found {len(dom_xss_findings)} DOM XSS findings")

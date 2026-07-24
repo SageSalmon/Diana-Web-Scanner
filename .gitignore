@@ -46,6 +46,7 @@ tf/**/.terraform.lock.hcl
 tf/**/*.tfstate
 tf/**/*.tfstate.backup
 tf/**/*.tfplan
+tf/**/*.plan
 tf/**/terraform.tfvars
 tf/**/backend.hcl
 tf/**/crash.log

@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import uuid
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from diana.core.http_client import ScopedHTTPClient
 from diana.core.models import Endpoint, Finding, Form, FormField, Severity, SiteMap, VulnType
@@ -90,6 +90,25 @@ DOM_XSS_PAYLOADS = [
     '<svg onload=alert(`xss`)>',
 ]
 
+# Route-name substrings that suggest the page echoes a URL parameter back into
+# the rendered DOM (search boxes, result/tracking/detail views). Generic across
+# SPA frameworks — matched case-insensitively against the route path.
+REFLECTION_ROUTE_KEYWORDS = [
+    "search", "track", "find", "query", "result", "lookup",
+    "view", "show", "detail", "product", "order", "page",
+]
+
+# Ubiquitous reflection parameter names, used as a fallback/supplement to the
+# names actually observed during the crawl. NOT tuned to any target — these are
+# the conventional query keys apps use for reflected input across the web.
+COMMON_REFLECTION_PARAMS = ["q", "query", "search", "id", "term", "keyword", "s", "name"]
+
+# Bounds for the browser-driven DOM-XSS param sweep. Each probe is a full page
+# render, so the route x param x payload space is capped; overflow is logged,
+# never silently dropped.
+MAX_DOM_XSS_ROUTES = 12
+MAX_DOM_XSS_PARAMS = 6
+
 
 class SPACrawler:
     """Discovers and tests SPA routes using Playwright headless browser."""
@@ -135,6 +154,31 @@ class SPACrawler:
 
         return list(set(filtered))
 
+    @staticmethod
+    def _parse_hashroute_params(href: str) -> tuple[str, list[str]] | None:
+        """Extract ``(route, [param_names])`` from an in-app hash-route link.
+
+        SPA links like ``#/track-result?id=5`` or ``/#/search?q=x`` carry the
+        query params the destination route actually reads. Capturing those names
+        turns a bare route into a *parameterized* endpoint, so the DOM-XSS sweep
+        can probe the real reflecting key instead of guessing. Returns None for
+        links without a hash fragment or query string. Generic across
+        frameworks — keyed on URL shape, never on a specific route or param.
+        """
+        if not href or "#" not in href:
+            return None
+        fragment = href.split("#", 1)[1]
+        if "?" not in fragment:
+            return None
+        path, query = fragment.split("?", 1)
+        route = path.strip("/").split("/")[0]
+        if not route:
+            return None
+        names = list(parse_qs(query, keep_blank_values=True).keys())
+        if not names:
+            return None
+        return route, names
+
     async def crawl_routes(self, base_url: str, routes: list[str], max_routes: int = 15) -> list[Endpoint]:
         """Navigate to high-value discovered routes with Playwright and extract content.
 
@@ -159,6 +203,10 @@ class SPACrawler:
         # (METHOD, url-without-query) so we keep one example per endpoint.
         captured_bodies: dict[tuple[str, str], dict] = {}
         base_origin = _origin_of(base_url)
+
+        # Parameterized hash routes discovered from in-app links, keyed by route
+        # so param names accumulate across pages (one endpoint per route).
+        route_params: dict[str, set[str]] = {}
 
         def _on_request(request) -> None:
             try:
@@ -204,6 +252,20 @@ class SPACrawler:
                             parameters=params,
                         ))
 
+                        # Capture parameterized hash-route links so the reflecting
+                        # param names enter the sitemap (generic — any SPA that
+                        # links to `#/route?key=value`).
+                        try:
+                            anchors = await page.query_selector_all("a[href]")
+                            for a in anchors:
+                                href = await a.get_attribute("href") or ""
+                                parsed = self._parse_hashroute_params(href)
+                                if parsed:
+                                    r_name, r_params = parsed
+                                    route_params.setdefault(r_name, set()).update(r_params)
+                        except Exception:
+                            pass
+
                         # Best-effort: fill visible inputs with benign values and
                         # submit, so the SPA issues its create/update XHR and we
                         # observe the request body. Generic across frameworks.
@@ -224,6 +286,14 @@ class SPACrawler:
                 url=body_url,
                 method=method,
                 request_body=body,
+            ))
+
+        # Emit one parameterized endpoint per hash route discovered from links.
+        for r_name, r_params in route_params.items():
+            endpoints.append(Endpoint(
+                url=f"{base}/#/{r_name}",
+                method="GET",
+                parameters={name: "" for name in sorted(r_params)},
             ))
 
         return endpoints
@@ -270,102 +340,176 @@ class SPACrawler:
             except Exception:
                 continue
 
-    async def test_dom_xss(self, base_url: str, routes: list[str]) -> list[Finding]:
-        """Test DOM XSS by injecting payloads into URL search parameters.
+    @staticmethod
+    def _dom_candidate_params(observed_params: set[str] | None) -> list[str]:
+        """Ordered, de-duplicated param names to probe for DOM reflection.
 
-        Navigates to routes like /#/search?q=<payload> and checks if the
-        payload executes in the rendered DOM.
+        Priority, highest signal first:
+          1. names *observed* in the crawl that are also conventional reflection
+             keys (the app demonstrably uses them, and they're the usual sinks),
+          2. the remaining *observed* names (real app parameters — still far
+             better evidence than a guess),
+          3. conventional keys never seen in the crawl (a pure fallback so the
+             sweep still fires on apps whose reflecting endpoint wasn't crawled).
+
+        Observed names lead throughout, so probing is target-driven rather than a
+        blind guess; the common-key fallback only fills leftover capacity. Every
+        tier can reach the output, so the cap never turns a tier into dead code.
+        Sorted within the observed tier for deterministic ordering. Capped at
+        ``MAX_DOM_XSS_PARAMS``.
+        """
+        observed = sorted({(n or "").strip() for n in (observed_params or set())})
+        observed_lower = {n.lower() for n in observed if n}
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def add(name: str) -> None:
+            key = name.lower()
+            if name and key not in seen:
+                ordered.append(name)
+                seen.add(key)
+
+        for name in COMMON_REFLECTION_PARAMS:  # tier 1: observed ∩ common
+            if name in observed_lower:
+                add(name)
+        for name in observed:                  # tier 2: other observed
+            add(name)
+        for name in COMMON_REFLECTION_PARAMS:  # tier 3: common-key fallback
+            add(name)
+
+        return ordered[:MAX_DOM_XSS_PARAMS]
+
+    async def _probe_dom_reflection(
+        self, browser, base: str, route: str, param: str, payload: str,
+    ) -> Finding | None:
+        """Render ``#/route?param=<payload>`` and report a finding if the payload
+        executes (dialog) or lands unencoded in the rendered DOM."""
+        page = await browser.new_page()
+        url = f"{base}/#{route}?{param}={quote(payload)}"
+
+        dialog_fired = False
+
+        async def handle_dialog(dialog):
+            nonlocal dialog_fired
+            dialog_fired = True
+            await dialog.dismiss()
+
+        page.on("dialog", handle_dialog)
+
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=10000)
+            await page.wait_for_timeout(1000)  # let deferred JS run
+            html = await page.content()
+        except Exception:
+            await page.close()
+            return None
+
+        endpoint = Endpoint(
+            url=f"{base}/#{route}", method="GET", parameters={param: ""},
+        )
+        finding: Finding | None = None
+        if dialog_fired:
+            finding = Finding(
+                id=f"DOMXSS-{uuid.uuid4().hex[:8]}",
+                vuln_type=VulnType.XSS_REFLECTED,
+                severity=Severity.HIGH,
+                title=f"Reflected XSS via URL parameter '{param}' at /{route}",
+                description=(
+                    f"A payload placed in the '{param}' URL parameter on the "
+                    f"/{route} route executed in the rendered page. Client-side "
+                    f"code reads the parameter and injects it into the DOM "
+                    f"without sanitization."
+                ),
+                endpoint=endpoint,
+                evidence=f"Payload triggered alert dialog: {payload}",
+                payload_used=payload,
+                cwe_id="CWE-79",
+                remediation=(
+                    "Sanitize user input before inserting into the DOM. Use "
+                    "framework-provided sanitization (Angular DomSanitizer, "
+                    "React's JSX escaping, etc.)."
+                ),
+                confirmed=True,
+            )
+        elif payload in html:
+            finding = Finding(
+                id=f"DOMXSS-{uuid.uuid4().hex[:8]}",
+                vuln_type=VulnType.XSS_REFLECTED,
+                severity=Severity.HIGH,
+                title=f"Reflected XSS via URL parameter '{param}' at /{route}",
+                description=(
+                    f"A payload placed in the '{param}' URL parameter on the "
+                    f"/{route} route was reflected unencoded into the rendered "
+                    f"DOM. Client-side code inserts the parameter into the page "
+                    f"without encoding."
+                ),
+                endpoint=endpoint,
+                evidence="Payload found unencoded in rendered HTML",
+                payload_used=payload,
+                cwe_id="CWE-79",
+                remediation="Sanitize user input before DOM insertion.",
+                confirmed=True,
+            )
+
+        await page.close()
+        return finding
+
+    async def test_dom_xss(
+        self,
+        base_url: str,
+        routes: list[str],
+        observed_params: set[str] | None = None,
+    ) -> list[Finding]:
+        """Test client-side reflected/DOM XSS by injecting payloads into URL
+        parameters of rendered SPA routes.
+
+        Navigates to ``/#/route?param=<payload>`` for each reflection-likely
+        route and each candidate parameter name, checking whether the payload
+        executes or is reflected unencoded in the DOM. Sweeping the parameter
+        names (not just a hardcoded ``q``) is what lets it reach reflectors keyed
+        on other names — an order-tracking view echoing ``id``, a profile view
+        echoing ``name`` — while staying framework-agnostic.
         """
         from playwright.async_api import async_playwright
 
         findings: list[Finding] = []
         base = base_url.rstrip("/")
 
-        # Routes likely to reflect input in the DOM
-        search_routes = [r for r in routes if any(
-            kw in r.lower() for kw in ["search", "track", "find", "query"]
-        )]
-
+        # Routes whose name suggests they echo a URL parameter into the DOM.
+        search_routes = [
+            r for r in routes
+            if any(kw in r.lower() for kw in REFLECTION_ROUTE_KEYWORDS)
+        ]
         if not search_routes:
             return findings
+
+        if len(search_routes) > MAX_DOM_XSS_ROUTES:
+            logger.info(
+                "DOM-XSS sweep capped at %d of %d candidate routes",
+                MAX_DOM_XSS_ROUTES, len(search_routes),
+            )
+            search_routes = search_routes[:MAX_DOM_XSS_ROUTES]
+
+        candidate_params = self._dom_candidate_params(observed_params)
 
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
 
                 for route in search_routes:
-                    for payload in DOM_XSS_PAYLOADS:
-                        page = await browser.new_page()
-                        encoded = quote(payload)
-                        url = f"{base}/#{route}?q={encoded}"
-
-                        dialog_fired = False
-
-                        async def handle_dialog(dialog):
-                            nonlocal dialog_fired
-                            dialog_fired = True
-                            await dialog.dismiss()
-
-                        page.on("dialog", handle_dialog)
-
-                        try:
-                            await page.goto(url, wait_until="networkidle", timeout=10000)
-                            # Small wait for any deferred JS execution
-                            await page.wait_for_timeout(1000)
-                        except Exception:
-                            await page.close()
-                            continue
-
-                        if dialog_fired:
-                            findings.append(Finding(
-                                id=f"DOMXSS-{uuid.uuid4().hex[:8]}",
-                                vuln_type=VulnType.XSS_DOM,
-                                severity=Severity.HIGH,
-                                title=f"DOM XSS at /{route}",
-                                description=(
-                                    f"DOM-based XSS triggered via URL parameter on "
-                                    f"the /{route} route. User input is rendered into "
-                                    f"the DOM without sanitization."
-                                ),
-                                endpoint=Endpoint(url=f"{base}/#{route}", method="GET",
-                                                  parameters={"q": ""}),
-                                evidence=f"Payload triggered alert dialog: {payload}",
-                                payload_used=payload,
-                                cwe_id="CWE-79",
-                                remediation=(
-                                    "Sanitize user input before inserting into the DOM. "
-                                    "Use framework-provided sanitization (Angular DomSanitizer, "
-                                    "React's JSX escaping, etc.)."
-                                ),
-                                confirmed=True,
-                            ))
-                            await page.close()
-                            break  # One finding per route is enough
-
-                        # Also check if payload is reflected in DOM without dialog
-                        html = await page.content()
-                        if payload in html:
-                            findings.append(Finding(
-                                id=f"DOMXSS-{uuid.uuid4().hex[:8]}",
-                                vuln_type=VulnType.XSS_DOM,
-                                severity=Severity.HIGH,
-                                title=f"DOM XSS (reflected) at /{route}",
-                                description=(
-                                    f"XSS payload reflected in rendered DOM on /{route}. "
-                                    f"User input from URL is inserted into the page without encoding."
-                                ),
-                                endpoint=Endpoint(url=f"{base}/#{route}", method="GET",
-                                                  parameters={"q": ""}),
-                                evidence=f"Payload found in rendered HTML",
-                                payload_used=payload,
-                                cwe_id="CWE-79",
-                                remediation="Sanitize user input before DOM insertion.",
-                                confirmed=True,
-                            ))
-                            await page.close()
-                            break
-
-                        await page.close()
+                    hit = False
+                    for param in candidate_params:
+                        for payload in DOM_XSS_PAYLOADS:
+                            finding = await self._probe_dom_reflection(
+                                browser, base, route, param, payload,
+                            )
+                            if finding:
+                                findings.append(finding)
+                                hit = True
+                                break  # one payload per param
+                        if hit:
+                            break  # one finding per route is enough
 
                 await browser.close()
         except Exception as e:
