@@ -35,6 +35,8 @@ reports/
 !**/.claude/skills/**
 !**/.claude/agents/
 !**/.claude/agents/**
+!**/.claude/workflows/
+!**/.claude/workflows/**
 
 # OS
 .DS_Store
