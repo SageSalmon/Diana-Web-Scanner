@@ -45,7 +45,7 @@ The rule of thumb: **iterate on the short loop, graduate to the long loop.**
 ### Phase 1 — the long loop only (Iterations 0–3)
 
 The project started with the full team loop: baseline scan → improvement →
-generality gate → tests → parallel AWS validation/test-runner/benchmark → review
+generality gate → tests → AWS validation → review
 → chronicle. This is the loop that establishes trust: cross-validated at every
 hop, merge-gated by a human-checked Review Agent.
 

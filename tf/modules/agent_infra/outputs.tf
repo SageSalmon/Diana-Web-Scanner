@@ -18,16 +18,6 @@ output "validation_task_definition_arn" {
   value       = aws_ecs_task_definition.validation.arn
 }
 
-output "test_runner_task_definition_arn" {
-  description = "ARN of the test runner agent ECS task definition"
-  value       = aws_ecs_task_definition.test_runner.arn
-}
-
-output "benchmark_task_definition_arn" {
-  description = "ARN of the benchmark agent ECS task definition"
-  value       = aws_ecs_task_definition.benchmark.arn
-}
-
 output "agent_task_role_arn" {
   description = "IAM role ARN for agent ECS tasks"
   value       = aws_iam_role.agent_task.arn

@@ -84,7 +84,7 @@ SUMMARY: <N> tests reviewed, <M> issues found
 
 ### Step 4: Report
 
-If FAIL, tell the user the tests need rework by `/agent-test-author` before proceeding. If PASS, tell them the branch is ready for AWS validation (Step 5 in the handoff chain: `/agent-validation`, `/agent-test-runner`, `/agent-benchmark` in parallel).
+If FAIL, tell the user the tests need rework by `/agent-test-author` before proceeding. If PASS, tell them the branch is ready for AWS validation (Step 5 in the handoff chain: `/agent-validation`).
 
 ## The Standard
 

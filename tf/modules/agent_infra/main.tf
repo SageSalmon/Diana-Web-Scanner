@@ -1,8 +1,8 @@
 ################################################################################
 # Diana — Agent Infrastructure Module
 #
-# S3 artifacts bucket, CodeBuild project, and ECS task definitions for the
-# agent team (validation, test runner, benchmark).
+# S3 artifacts bucket, CodeBuild project, and the validation ECS task definition
+# (also reused by the tiny loop) for the agent team.
 ################################################################################
 
 # --- S3 Artifacts Bucket -----------------------------------------------------
@@ -323,111 +323,6 @@ resource "aws_ecs_task_definition" "validation" {
 
   tags = {
     Name        = "${var.project}-agent-validation"
-    Environment = var.environment
-  }
-}
-
-# --- Test Runner Task Definition (Diana only, no target) ---------------------
-
-resource "aws_ecs_task_definition" "test_runner" {
-  family                   = "${var.project}-agent-test"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 1024
-  memory                   = 2048
-  execution_role_arn       = var.execution_role_arn
-  task_role_arn            = aws_iam_role.agent_task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "diana-test"
-      image     = "${var.ecr_repository_url}:agent-latest"
-      essential = true
-      entryPoint = ["/bin/bash", "/app/scripts/entrypoint-test.sh"]
-      command    = []
-
-      environment = [
-        { name = "AWS_REGION", value = var.aws_region },
-        { name = "S3_ARTIFACTS_BUCKET", value = aws_s3_bucket.artifacts.bucket },
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = var.log_group_name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "agent-test"
-        }
-      }
-    }
-  ])
-
-  tags = {
-    Name        = "${var.project}-agent-test"
-    Environment = var.environment
-  }
-}
-
-# --- Benchmark Task Definition (Diana + Juice Shop sidecar) -----------------
-
-resource "aws_ecs_task_definition" "benchmark" {
-  family                   = "${var.project}-agent-benchmark"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 2048
-  memory                   = 4096
-  execution_role_arn       = var.execution_role_arn
-  task_role_arn            = aws_iam_role.agent_task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "diana-scanner"
-      image     = "${var.ecr_repository_url}:agent-latest"
-      essential = true
-      entryPoint = ["/bin/bash", "/app/scripts/entrypoint-benchmark.sh"]
-      command    = []
-
-      environment = [
-        { name = "AWS_REGION", value = var.aws_region },
-        { name = "DIANA_LLM_PROVIDER", value = "bedrock" },
-        { name = "DIANA_AI_ENABLED", value = "true" },
-        { name = "S3_ARTIFACTS_BUCKET", value = aws_s3_bucket.artifacts.bucket },
-        { name = "TARGET_URL", value = "http://localhost:3000" },
-        { name = "DATABASE_URL", value = "postgresql://${var.db_username}:${var.db_password}@${var.db_endpoint}:5432/${var.db_name}" },
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = var.log_group_name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "agent-benchmark"
-        }
-      }
-    },
-    {
-      name      = "juice-shop"
-      image     = "bkimminich/juice-shop:latest"
-      essential = false
-
-      portMappings = [{
-        containerPort = 3000
-        protocol      = "tcp"
-      }]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = var.log_group_name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "agent-benchmark-juiceshop"
-        }
-      }
-    }
-  ])
-
-  tags = {
-    Name        = "${var.project}-agent-benchmark"
     Environment = var.environment
   }
 }

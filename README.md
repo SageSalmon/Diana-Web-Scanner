@@ -151,10 +151,15 @@ The agent team runs a continuous improvement loop: scan a target, measure detect
 3. IMPLEMENT        Improvement Agent writes code on a feature branch
 4. GENERALITY GATE  Generality Agent reviews diff — rejects target-specific code
 5. TEST AUTHORING   Test Author writes tests, Test Critic reviews them
-6. AWS VALIDATION   Validation + Test Runner + Benchmark run in parallel on ECS
+6. AWS VALIDATION   Validation Agent runs a full fresh-crawl scan on ECS
 7. REVIEW           Review Agent synthesizes all results, recommends merge or reject
 8. CHRONICLE        Review Agent records metrics, narrative, and next steps
 ```
+
+> **Autonomous mode:** the steps above are the manual/interactive loop. For a
+> hands-off run toward a solve-rate % target, the `juiceshop-solve-loop` workflow
+> parallelizes K module auditors per round, integrates, full-scans, auto-merges,
+> and repeats — see [docs/AGENTIC_SDLC.md](docs/AGENTIC_SDLC.md).
 
 ### The Agents
 
@@ -165,8 +170,7 @@ The agent team runs a continuous improvement loop: scan a target, measure detect
 | **Generality** | Local | Review every changed line — reject code that only works against one target or tech stack |
 | **Test Author** | Local | Write unit tests for new/changed code with synthetic fixtures (no live targets) |
 | **Test Critic** | Local | Review tests for correctness, completeness, and independence — reject vacuous tests |
-| **Test Runner** | AWS (ECS) | Execute pytest suite on the branch |
-| **Benchmark** | AWS (ECS) | Timed scan measuring duration, token usage, and HTTP request count |
+| **Tiny-loop** | AWS (ECS) | Fast single-module scan on a cached crawl for inner-loop iteration |
 | **Review** | Local | Final quality gate — synthesize all agent verdicts, write chronicle entry, recommend merge/reject |
 | **Orchestrator** | Local | Run the full loop, enforce gate ordering, detect stalls |
 
@@ -176,10 +180,9 @@ Every agent that produces output has a different agent that validates it:
 
 | Producer | Validator |
 |----------|-----------|
-| Improvement Agent | Generality, Test Critic, Validation, Benchmark |
+| Improvement Agent | Generality, Test Critic, Validation |
 | Test Author | Test Critic |
 | Validation Agent | Review Agent |
-| Benchmark Agent | Review Agent |
 | Review Agent | Human (the only output you need to check) |
 
 ### AWS Infrastructure

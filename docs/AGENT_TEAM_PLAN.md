@@ -1,5 +1,12 @@
 # Diana Agent Team — Planning Document
 
+> **Historical design doc.** Reflects the original plan. Two agents described
+> below — the **Test Runner** (#6) and **Benchmark** (#7) — were **removed**
+> (2026-07-24): unit tests run locally in ~5s (no need for an ECS task), and
+> performance is read from the validation scan's own `scan_duration_seconds`
+> rather than a separate timed run. For the current process see
+> [AGENT_LOOPS.md](AGENT_LOOPS.md) and [AGENTIC_SDLC.md](AGENTIC_SDLC.md).
+
 ## Goal
 
 Build a team of Claude Code agents that iteratively improve Diana's vulnerability detection capabilities. The first objective: **increase Juice Shop challenge coverage by 5%** while keeping all improvements generic — nothing Juice Shop-specific enters the codebase.

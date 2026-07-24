@@ -27,22 +27,21 @@ Fetch all agent results if not already local:
 ```
 
 Read the following files:
-- `./agent-results/$RUN_ID/validation/results.json` — scan results + challenge solve rate
+- `./agent-results/$RUN_ID/validation/results.json` — scan results + challenge solve rate + `performance.scan_duration_seconds`
 - `./agent-results/$RUN_ID/validation/gap-analysis.md` — what was missed
-- `./agent-results/$RUN_ID/test-runner/results.json` — test pass/fail
-- `./agent-results/$RUN_ID/benchmark/results.json` — performance + cost
 
 Also check for local gate results (these are in the conversation context, not files):
 - Generality Agent verdict (from `/agent-generality`)
 - Test Critic verdict (from `/agent-test-critic`)
+- Unit-test result — the suite runs **locally** (`.venv/bin/python -m pytest tests/unit -q`), not on AWS
 
 ### Step 2: Evaluate Pass/Fail Criteria
 
 | Criterion | Source | Pass | Fail |
 |---|---|---|---|
 | Solve rate improved | Validation | Higher than baseline | Lower than baseline |
-| No test regressions | Test Runner | All tests pass | Any failure |
-| Performance acceptable | Benchmark | Within thresholds | >20% slower AND >50% more costly |
+| No test regressions | Local pytest | All tests pass | Any failure |
+| Performance acceptable | Validation `scan_duration_seconds` | Within thresholds | >20% slower AND >50% more costly |
 | Code is generic | Generality | PASS or WARN | FAIL |
 | Tests are sound | Test Critic | PASS | FAIL |
 
@@ -54,7 +53,7 @@ Also check for local gate results (these are in the conversation context, not fi
 ### Step 3: Calculate Iteration Cost
 
 Sum costs across all scans run in this iteration:
-- Validation scan tokens + Benchmark scan tokens
+- Validation scan tokens (+ any tiny-loop scans run while converging)
 - If there were rejected attempts (re-runs), include those too
 - Use `scripts/bedrock-pricing.json` for price calculation
 - Track cumulative cost from previous chronicle entries
@@ -75,7 +74,7 @@ Write to `./agent-results/$RUN_ID/chronicle.json`:
   "tests": { "total": N, "passed": N, "failed": N, "coverage_pct": N },
   "cost": { "scans_run": N, "attempts": N, "total_input_tokens": N, "total_output_tokens": N, "estimated_cost_usd": X.XX, "cumulative_cost_usd": X.XX },
   "synopsis": "<narrative>",
-  "verdicts": { "generality": "...", "test_critic": "...", "test_runner": "...", "validation": "...", "benchmark": "..." },
+  "verdicts": { "generality": "...", "test_critic": "...", "unit_tests": "...", "validation": "..." },
   "next_opportunities": ["...", "..."]
 }
 ```

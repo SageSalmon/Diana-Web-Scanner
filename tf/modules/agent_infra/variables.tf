@@ -53,7 +53,7 @@ variable "log_group_arn" {
   type        = string
 }
 
-# --- Database (for validation + benchmark scans) ---
+# --- Database (for validation scans) ---
 
 variable "db_endpoint" {
   description = "RDS cluster endpoint"

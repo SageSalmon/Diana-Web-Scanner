@@ -6,7 +6,7 @@
 #
 # Arguments:
 #   run-id      — iteration identifier
-#   agent-name  — optional: validation | test-runner | benchmark
+#   agent-name  — optional: validation | tinyloop
 #                 If omitted, fetches all agents for the run.
 #
 # Output:
@@ -57,18 +57,6 @@ if agent == 'validation':
     print(f\"  Solve rate: {det.get('challenges_solved', 0)}/{det.get('challenges_total', 0)} ({det.get('solve_rate', 0):.1%})\")
     print(f\"  Findings: {data.get('findings', {}).get('total', 0)}\")
     print(f\"  Duration: {data.get('performance', {}).get('scan_duration_seconds', 0)}s\")
-elif agent == 'test-runner':
-    tests = data.get('tests', {})
-    status = 'PASSED' if data.get('passed') else 'FAILED'
-    print(f\"  Status: {status}\")
-    print(f\"  Tests: {tests.get('total', 0)} total, {tests.get('passed', 0)} passed, {tests.get('failed', 0)} failed\")
-elif agent == 'benchmark':
-    perf = data.get('performance', {})
-    tokens = data.get('tokens', {})
-    print(f\"  Duration: {perf.get('scan_duration_seconds', 0)}s\")
-    print(f\"  Input tokens: {tokens.get('total_input', 0):,}\")
-    print(f\"  Output tokens: {tokens.get('total_output', 0):,}\")
-    print(f\"  LLM calls: {tokens.get('total_calls', 0)}\")
 elif agent == 'tinyloop':
     det = data.get('detection', {})
     print(f\"  Modules: {', '.join(data.get('modules', []))}\")

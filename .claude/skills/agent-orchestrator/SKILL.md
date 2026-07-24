@@ -11,8 +11,8 @@ Run the full iteration loop as defined in the Agent Team Plan. Manages the hando
 
 > **Model:** run inline on the session's top-tier model (Opus) — this role drives
 > the loop's judgement calls and gate ordering. The mechanical sub-roles it hands
-> off to (validation/tinyloop/test-runner/benchmark → Haiku; generality/test-author/
-> test-critic → Sonnet) should be **dispatched as subagents** via the matching
+> off to (validation/tinyloop → Haiku; generality/test-author/test-critic →
+> Sonnet) should be **dispatched as subagents** via the matching
 > `.claude/agents/*.md` definitions so each runs on its cheaper tier.
 
 ## Arguments
@@ -33,7 +33,7 @@ Step 3: IMPLEMENT          → /agent-improvement
 Step 4a: GENERALITY GATE   → /agent-generality (blocks Step 4b on FAIL)
 Step 4b: TEST AUTHORING    → /agent-test-author
 Step 4c: TEST CRITIC GATE  → /agent-test-critic (blocks Step 5 on FAIL)
-Step 5: AWS VALIDATION     → /agent-validation + /agent-test-runner + /agent-benchmark (parallel, same run-id)
+Step 5: AWS VALIDATION     → /agent-validation (full fresh-crawl scan; unit tests run locally in Step 4)
 Step 6: REVIEW GATE        → /agent-review
 Step 7: UPDATE BASELINE    → merge if approved
 ```
@@ -79,7 +79,7 @@ After each step, report status:
 [Step 4b/7] ✓ 12 tests written
 [Step 4c/7] ✓ Test Critic PASS
 [Step 5/7] ⏳ AWS validation running... (3 tasks in parallel)
-[Step 5/7] ✓ Validation: 34% (+3%) | Tests: 12/12 | Benchmark: +45s
+[Step 5/7] ✓ Validation: 34% (+3%) | Tests: 12/12 (local) | Duration: +45s
 [Step 6/7] ✓ Review: MERGE recommended
 [Step 7/7] ⏳ Awaiting user confirmation to merge
 ```

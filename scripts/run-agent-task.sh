@@ -5,7 +5,7 @@
 #   ./scripts/run-agent-task.sh <task-type> <branch-ref> [run-id]
 #
 # Arguments:
-#   task-type   — validation | test | benchmark
+#   task-type   — validation | tinyloop
 #   branch-ref  — git branch to build and test
 #   run-id      — optional; auto-generated as iteration-<timestamp> if omitted
 #
@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-TASK_TYPE="${1:?Usage: $0 <validation|test|benchmark> <branch-ref> [run-id]}"
+TASK_TYPE="${1:?Usage: $0 <validation|tinyloop> <branch-ref> [run-id]}"
 BRANCH_REF="${2:?Usage: $0 <task-type> <branch-ref> [run-id]}"
 RUN_ID="${3:-iteration-$(date +%Y%m%d-%H%M%S)}"
 
@@ -44,12 +44,10 @@ SG="${ECS_SG:-$(get_tf_output scanner_sg_id)}"
 # and swaps the entrypoint via the AGENT_ENTRYPOINT env override below.
 case "$TASK_TYPE" in
   validation) TASK_FAMILY="diana-agent-validation"; CONTAINER_NAME="diana-scanner" ;;
-  test)       TASK_FAMILY="diana-agent-test";       CONTAINER_NAME="diana-test" ;;
-  benchmark)  TASK_FAMILY="diana-agent-benchmark";  CONTAINER_NAME="diana-scanner" ;;
   tinyloop)   TASK_FAMILY="diana-agent-validation"; CONTAINER_NAME="diana-scanner" ;;
   *)
     echo "ERROR: Unknown task type: $TASK_TYPE"
-    echo "Valid types: validation, test, benchmark, tinyloop"
+    echo "Valid types: validation, tinyloop"
     exit 1
     ;;
 esac
