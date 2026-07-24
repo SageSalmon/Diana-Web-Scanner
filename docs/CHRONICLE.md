@@ -1,5 +1,55 @@
 # Diana Agent Team — Chronicle
 
+## Iteration 8 — Client-side reflected XSS via SPA URL-param sweep (2026-07-24) ✓ MERGED
+
+**Solve rate: 15.9% → 16.8% (18/113 → 19/113, +1 net)**  |  Findings: 217 (2 critical, 40 high)
+**Cost: ~$0.25 Fargate (Bedrock tokens not captured — emitter still empty)**  |  Cumulative: ~$6.25
+
+Flipped **Reflected XSS**. DOM XSS retained; **zero regressions** across all
+categories. Duration +21.7% (5226s → 6360s) from the added browser renders —
+WARN, not a fail: the extra work is token-free Playwright, no LLM-cost blowup.
+
+**The honest arc — a +0 first attempt, then a re-aim.** The iteration opened with
+*server-side path-parameter injection* (`xss.py`: inject a payload into a discrete
+path segment, detect it in the HTTP response body). Generic and well-tested, but
+tiny-loop validation showed **+0**: Juice Shop's Reflected XSS reflects the `id`
+**query** param **client-side** (Angular renders it into the DOM), so an
+HTTP-response path check was the wrong axis on both counts — and the reflecting
+`track-result?id=` endpoint was never even captured as parameterized. The
+path-injection code stayed (latent generic server-side coverage); the target work
+re-aimed at the real gap.
+
+**Root cause, precisely:** the SPA crawler's DOM-XSS probe (`test_dom_xss`) runs
+in the crawl phase and hardcoded the query key to `q` — so `search?q=` flipped
+DOM XSS while any route reflecting a *different* param went undetected.
+
+**The generic fix (spa_crawler.py + orchestrator.py):**
+- `crawl_routes` captures query-param names from in-app hash-route links
+  (`#/route?key=value`) into the sitemap — real reflecting names, not guesses.
+- `test_dom_xss` **sweeps** candidate param names instead of `q` alone:
+  observed-from-crawl first, then a generic `COMMON_REFLECTION_PARAMS` fallback,
+  navigating `#/route?param=<payload>` and checking dialog execution or unencoded
+  DOM reflection. Bounded (`MAX_DOM_XSS_ROUTES`/`PARAMS`), cap logged not silent.
+- `_dom_candidate_params` ranks `[observed∩common, other-observed, common
+  fallback]` so every tier is reachable within the cap — no dead tier.
+- Orchestrator harvests observed param names from `sitemap.endpoints`.
+
+Param names come from observed traffic plus conventional web keys — no target
+hostnames, route names, or credentials in control flow (Generality PASS).
+
+**Gates:** Generality PASS. Test-critic FAIL→PASS — it caught that the param
+tiering left "other observed" as **dead code** under the cap (a vacuous
+case-dedup test passed even with dedup broken); fixed at the **root** by
+reordering the tiers, not by loosening the test (mutation-verified on re-review).
+16 new pure-function tests; full unit suite 114 pass.
+
+**Next opportunities (unchanged priorities):** Sensitive Data Exposure (3/16)
+still the largest untapped category; API-only / Client-side XSS Protection remain
+(need stored-then-rendered and CSP-aware probes); the `token_usage` emitter still
+returns empty and should be fixed so cost is tracked.
+
+---
+
 ## Iteration 7 — Archetype capability profiler (P0) (2026-07-07) ✓ MERGED
 
 **Solve rate: 14.2% → 15.9% (16/113 → 18/113, +2 net)**  |  Findings: 229 (3 critical, 36 high)
