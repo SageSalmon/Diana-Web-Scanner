@@ -38,7 +38,14 @@ from diana.scanners.base import BaseScanner
 # Keep runtime/cost bounded on large sitemaps.
 MAX_DIRS = 40
 MAX_FILES = 60
-MAX_REQUESTS = 500
+MAX_REQUESTS = 900
+
+# Two-segment combinations of common dir names to probe directly (e.g.
+# support/logs). File stores are frequently nested one directory deep and
+# reachable by path even when the intermediate directory is neither linked from
+# the app nor itself listable, so the flat COMMON_DIRS probes never reach them.
+# The full ordered product of COMMON_DIRS is ~len(COMMON_DIRS)^2; this caps it.
+MAX_NESTED_DIRS = 400
 
 # Bytes of the response body compared to recognize a repeated soft-404 shell.
 HEAD_LEN = 200
@@ -113,6 +120,14 @@ class SensitiveDataExposureScanner(BaseScanner):
         #    subdirectories (e.g. .../logs/) is followed one/two levels deeper.
         #    Each listing also harvests the files it exposes.
         dir_queue = list(candidate_dirs)[:MAX_DIRS]
+        # Also probe nested combinations of common dir names directly. These are
+        # seeded up front (not discovered from a listing), so they reach file
+        # stores like support/logs that no page links to and whose parent dir is
+        # not itself listable.
+        dir_queue += self._nested_common_dirs(base)
+        # BFS may follow subdirectories found inside an open listing; bound that
+        # growth relative to the seeded queue so a listing can't fan out forever.
+        max_queue = len(dir_queue) + 40
         depth = {d: 0 for d in dir_queue}
         checked: set[str] = set()
         i = 0
@@ -132,7 +147,7 @@ class SensitiveDataExposureScanner(BaseScanner):
             if depth.get(dir_url, 0) < MAX_LISTING_DEPTH:
                 for sd in subdirs:
                     if sd not in checked and sd not in depth \
-                            and len(dir_queue) < MAX_DIRS + 40:
+                            and len(dir_queue) < max_queue:
                         depth[sd] = depth[dir_url] + 1
                         dir_queue.append(sd)
 
@@ -150,7 +165,8 @@ class SensitiveDataExposureScanner(BaseScanner):
             findings.extend(await self._probe_null_byte(file_url, seen))
 
         print(
-            f"  sensitive_data_exposure: {len(candidate_dirs)} dirs, "
+            f"  sensitive_data_exposure: {len(checked)} dirs "
+            f"({len(candidate_dirs)} flat + nested), "
             f"{len(discovered_files)} files, {self._requests_sent} probes, "
             f"{len(findings)} findings"
         )
@@ -172,6 +188,28 @@ class SensitiveDataExposureScanner(BaseScanner):
             dirs.add(f"{base}/{name}/")
         dirs.discard(f"{base}/")  # the app root is not an interesting "listing"
         return dirs
+
+    def _nested_common_dirs(self, base: str) -> list[str]:
+        """Ordered two-segment combinations of common dir names (e.g.
+        ``support/logs``).
+
+        Sensitive file stores are commonly one directory deep and reachable by
+        path even when the parent directory is not linked from any page and is
+        not itself browsable, so the flat COMMON_DIRS probes never discover
+        them. The ordering is deterministic (the plain product of COMMON_DIRS
+        with itself), keeping request-budget spend reproducible, and the count
+        is capped by ``MAX_NESTED_DIRS``. This is purely conventional-name
+        combinatorics — no target-specific paths.
+        """
+        nested: list[str] = []
+        for outer in COMMON_DIRS:
+            for inner in COMMON_DIRS:
+                if inner == outer:
+                    continue
+                nested.append(f"{base}/{outer}/{inner}/")
+                if len(nested) >= MAX_NESTED_DIRS:
+                    return nested
+        return nested
 
     # -- soft-404 learning -----------------------------------------------------
 
