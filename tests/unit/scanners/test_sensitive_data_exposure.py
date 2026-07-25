@@ -238,6 +238,80 @@ async def test_nested_common_dirs_are_generic_and_bounded():
 
 
 @pytest.mark.asyncio
+async def test_nested_common_dirs_cap_is_enforced():
+    # The ordered product of COMMON_DIRS with itself (minus self-pairs) exceeds
+    # MAX_NESTED_DIRS, so the cap must actually be exercised, not just an
+    # unreached upper bound.
+    from diana.scanners.sensitive_data_exposure import COMMON_DIRS, MAX_NESTED_DIRS
+
+    n = len(COMMON_DIRS)
+    full_product = n * (n - 1)
+    scanner = _make({}, [])
+    nested = scanner._nested_common_dirs("http://t")
+
+    assert full_product > MAX_NESTED_DIRS, (
+        "test assumption violated: COMMON_DIRS shrank enough that the nested "
+        "product no longer exceeds the cap"
+    )
+    assert len(nested) == MAX_NESTED_DIRS
+
+
+@pytest.mark.asyncio
+async def test_nested_probe_no_finding_when_no_nested_store_exists():
+    # Every nested combination resolves to the SPA soft-404 shell. The scanner
+    # must probe them (true negative, not "never checked") without reporting
+    # any listing.
+    scanner = _make({}, ["http://t/app/main.js"])
+    findings = await scanner.scan(ScanConfig())
+
+    assert findings == []
+    assert "http://t/support/logs/" in scanner.http.requested
+
+
+@pytest.mark.asyncio
+async def test_subdirectory_discovery_not_starved_by_nested_seed():
+    # Regression guard: nested-dir seeding alone (~hundreds of entries) fills
+    # the queue well past the OLD fixed cap of MAX_DIRS + 40 (80) before any
+    # listing is even checked. If the subdirectory-growth bound were still that
+    # fixed constant, subdirectories discovered via a real listing could never
+    # be appended. The bound must scale with the seeded queue instead.
+    support_body = (
+        "<html><title>Index of /support</title>"
+        '<a href="../">../</a>'
+        '<a href="alpha/">alpha/</a><a href="bravo/">bravo/</a>'
+        '<a href="charlie/">charlie/</a>'
+        "</html>"
+    )
+    routes = {
+        "http://t/support/": (200, support_body),
+        "http://t/support/alpha/": (
+            200,
+            '<html><title>Index of /support/alpha</title>'
+            '<a href="../">../</a><a href="a.log">a.log</a></html>',
+        ),
+        "http://t/support/bravo/": (
+            200,
+            '<html><title>Index of /support/bravo</title>'
+            '<a href="../">../</a><a href="b.log">b.log</a></html>',
+        ),
+        "http://t/support/charlie/": (
+            200,
+            '<html><title>Index of /support/charlie</title>'
+            '<a href="../">../</a><a href="c.log">c.log</a></html>',
+        ),
+    }
+    scanner = _make(routes, ["http://t/app/main.js"])
+    findings = await scanner.scan(ScanConfig())
+
+    titles = " ".join(f.title for f in findings)
+    for sub in ("alpha", "bravo", "charlie"):
+        assert f"http://t/support/{sub}/" in titles, (
+            f"subdirectory {sub}/ was not discovered/reported; the queue-growth "
+            "bound may have regressed to a fixed constant"
+        )
+
+
+@pytest.mark.asyncio
 async def test_completes_all_work_items():
     scanner = _make({}, ["http://t/a.js", "http://t/b.js"])
     await scanner.scan(ScanConfig())
