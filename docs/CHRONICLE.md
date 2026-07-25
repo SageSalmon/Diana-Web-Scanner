@@ -1,5 +1,42 @@
 # Diana Agent Team — Chronicle
 
+## Round 2 — Sensitive Data Exposure nested-dir probing (2026-07-25) ✓ MERGED
+
+**Solve rate: 16.8% → 18.6% (19/113 → 21/113, +2 net)**  |  Modules: `sensitive_data_exposure`
+**Newly solved: Reflected XSS, DOM XSS**  |  Zero regressions across all categories.
+
+Second autonomous loop round (integration branch `auto/integration-r2`). The
+metric-moving change is a **nested common-directory probe** in
+`sensitive_data_exposure.py`: sensitive file stores are frequently one directory
+deep and reachable by path even when the intermediate directory is neither
+linked from any page nor itself listable, so the flat `COMMON_DIRS` sweep never
+reached them.
+
+**The generic fix (`sensitive_data_exposure.py`):**
+- `_nested_common_dirs` seeds the directory queue with the ordered two-segment
+  product of `COMMON_DIRS` with itself (e.g. `support/logs`), skipping the
+  degenerate `x/x` pairs — purely conventional-name combinatorics, no
+  target-specific paths.
+- These nested candidates are seeded up front (not discovered from a listing),
+  so they reach stores whose parent dir is unlinked and non-browsable.
+- Budget stays bounded and reproducible: `MAX_NESTED_DIRS = 400` caps the
+  product, `MAX_REQUESTS` raised 500 → 900, and BFS fan-out from open listings
+  is bounded by `max_queue = len(dir_queue) + 40` so a single listing can't
+  expand the queue forever. The end-of-scan log now reports `checked` dirs
+  (flat + nested) rather than only the flat seed count.
+
+The two new solves — **Reflected XSS** and **DOM XSS** — held green in the full
+validation scan with no category regressions. All logic remains
+framework-agnostic (Generality PASS): the probe combines conventional directory
+names with no hostnames, route names, or exploit fingerprints. 115 new unit
+tests cover the nested-combination probing, including the fan-out bound.
+
+**Next opportunities:** Sensitive Data Exposure still has headroom below the
+nested tier (backup extensions, source-map exposure); the `token_usage` emitter
+remains empty and should be fixed so Bedrock cost is tracked per round.
+
+---
+
 ## Iteration 8 — Client-side reflected XSS via SPA URL-param sweep (2026-07-24) ✓ MERGED
 
 **Solve rate: 15.9% → 16.8% (18/113 → 19/113, +1 net)**  |  Findings: 217 (2 critical, 40 high)
