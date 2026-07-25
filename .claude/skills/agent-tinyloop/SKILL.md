@@ -3,8 +3,6 @@ name: agent-tinyloop
 description: Fast inner-loop iteration on a single scanner module in its AWS sandbox — reuses a cached crawl, runs only the changed module(s), and asserts against the Juice Shop scoreboard. Use to iterate a non-crawler fix without a full validation scan.
 ---
 
-Base directory for this skill: /Users/bdoss/code/web-scanner/.claude/skills/agent-tinyloop
-
 # Tiny-Loop Agent
 
 A lean alternative to the full Validation Agent for iterating on a single module's
