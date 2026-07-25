@@ -197,6 +197,47 @@ async def test_recurses_into_subdirectory_listing():
 
 
 @pytest.mark.asyncio
+async def test_probes_nested_common_dir_combinations():
+    # A file store nested one directory deep (logs inside support) that no page
+    # links to and whose parent (/support/) is NOT itself listable. The flat
+    # COMMON_DIRS probes only hit /support/ and /logs/ as roots; the scanner
+    # must additionally probe the nested combination /support/logs/.
+    logs_body = (
+        "<html><title>Index of /support/logs</title>"
+        '<a href="../">../</a><a href="access.log">access.log</a></html>'
+    )
+    routes = {
+        "http://t/support/logs/": (200, logs_body),
+        "http://t/support/logs/access.log": (200, "1.2.3.4 - GET /x " + "L" * 300),
+    }
+    scanner = _make(routes, ["http://t/app/main.js"])
+    findings = await scanner.scan(ScanConfig())
+
+    titles = " ".join(f.title for f in findings)
+    assert "http://t/support/logs/" in titles
+    assert "http://t/support/logs/access.log" in scanner.http.requested
+
+
+@pytest.mark.asyncio
+async def test_nested_common_dirs_are_generic_and_bounded():
+    from diana.scanners.sensitive_data_exposure import (
+        COMMON_DIRS, MAX_NESTED_DIRS,
+    )
+    scanner = _make({}, [])
+    nested = scanner._nested_common_dirs("http://t")
+    # Two conventional names combined, no self-pairs, capped, deterministic.
+    assert "http://t/support/logs/" in nested
+    assert "http://t/logs/support/" in nested
+    assert "http://t/logs/logs/" not in nested          # no self-combination
+    assert len(nested) <= MAX_NESTED_DIRS
+    assert nested == scanner._nested_common_dirs("http://t")  # deterministic
+    # Only combinations of the conventional COMMON_DIRS names, nothing else.
+    for url in nested:
+        outer, inner = url[len("http://t/"):].rstrip("/").split("/")
+        assert outer in COMMON_DIRS and inner in COMMON_DIRS
+
+
+@pytest.mark.asyncio
 async def test_completes_all_work_items():
     scanner = _make({}, ["http://t/a.js", "http://t/b.js"])
     await scanner.scan(ScanConfig())
