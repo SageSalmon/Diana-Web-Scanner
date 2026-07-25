@@ -269,11 +269,13 @@ For each: the single module, a title, the specific UNSOLVED Juice Shop challenge
   for (const r of results.filter(x => !x.flipped)) log(`  · ${r.module}: ${r.reason}`)
   if (green.length === 0) { dry++; log(`Round ${round}: no green auditors (dry ${dry}/${DRY_LIMIT}).`); continue }
 
-  // INTEGRATE
+  // INTEGRATE — runs in its OWN worktree so it never moves the primary working
+  // tree off main (an early run left the primary checked out on the integration
+  // branch, stranding later commits). Fetch + merge the REMOTE auto/* branches.
   const integ = await agent(
-    `Create integration branch "auto/integration-r${round}" from latest main and merge these validated branches into it: ${green.map(g => g.branch).join(', ')}.
-They are module-disjoint so merges should be clean; if any conflict is non-trivial, drop that branch and note it. Run the full unit suite (.venv/bin/python -m pytest tests/unit -q) and confirm it passes. Push the integration branch. Report the branch and which branches were actually merged.`,
-    { label: `integrate:r${round}`, phase: 'Integrate', schema: INTEGRATE_SCHEMA },
+    `You are in a dedicated git worktree — do NOT touch or checkout branches in any other working tree. Create integration branch "auto/integration-r${round}" from origin/main (git fetch origin first) and merge these validated remote branches into it: ${green.map(g => 'origin/' + g.branch).join(', ')}.
+They are module-disjoint so merges should be clean; if any conflict is non-trivial, drop that branch and note it. Run the full unit suite (.venv/bin/python -m pytest tests/unit -q) and confirm it passes. Push the integration branch to origin (CodeBuild builds from the remote). Report the branch and which branches were actually merged. Do NOT check out or modify main.`,
+    { label: `integrate:r${round}`, phase: 'Integrate', isolation: 'worktree', schema: INTEGRATE_SCHEMA },
   )
   if (!integ || !integ.ok) { log(`Round ${round}: integration failed (${integ ? integ.detail : 'agent failed'}).`); dry++; continue }
 
@@ -307,7 +309,7 @@ Report challenges_solved, the newly_solved list vs a baseline of ${solved}, and 
   const clean = (val.regressions || []).length === 0
   if (improved && clean) {
     const mg = await agent(
-      `Merge integration branch ${integ.branch} into main with --no-ff and push. Then append a Chronicle entry to docs/CHRONICLE.md summarizing round ${round}: solve rate ${pct(solved)}% -> ${pct(val.solved)}% (+${val.solved - solved}), modules ${green.map(g => g.module).join(', ')}, newly solved ${(val.newly_solved || []).join(', ')}. Commit the chronicle on main and push.`,
+      `In the PRIMARY working tree (do not create a worktree): 'git fetch origin', 'git checkout main', 'git merge --no-ff origin/${integ.branch}', resolve trivially if needed, then append a Chronicle entry to docs/CHRONICLE.md summarizing round ${round}: solve rate ${pct(solved)}% -> ${pct(val.solved)}% (+${val.solved - solved}), modules ${green.map(g => g.module).join(', ')}, newly solved ${(val.newly_solved || []).join(', ')}. Commit the chronicle on main, then 'git push origin main'. Leave the working tree checked out on main. Report merged=true only after the push to main succeeds.`,
       { label: `merge:r${round}`, phase: 'BigScan', schema: MERGE_SCHEMA },
     )
     if (mg && mg.merged) {
