@@ -155,17 +155,39 @@ anything" — it means "merge a verified improvement without waiting for a human
 
 ## Running it
 
+This is **not** a shell command — the loop is orchestrated by the
+[Claude Code](https://claude.com/claude-code) **Workflow tool**, which runs the
+subagent fleet. You invoke it from inside a Claude Code session:
+
 ```
-Workflow({ name: 'juiceshop-solve-loop', args: { targetPct: 25 } })
+Workflow({
+  scriptPath: ".claude/workflows/juiceshop-solve-loop.js",
+  args: { targetPct: 22 }
+})
 ```
 
-- `targetPct` (required) — absolute solve-rate % to reach (e.g. 25 = 25% of 113).
+> **Use `scriptPath`, not `name`.** Invoking by `name` resolves to a snapshot
+> taken at first use and will silently run a stale copy of the script if you've
+> edited it. `scriptPath` always reads the live file.
+
+**Preconditions (the run aborts or fails without these):**
+1. **Claude Code** with Workflow support, run from the repo root. The subagent
+   definitions in `.claude/agents/` and `.claude/skills/` must be present (they
+   are, in this repo).
+2. **AWS infra up** — `terraform apply` in `tf/environments/dev` first (see the
+   README's AWS Deployment section). The Prep phase aborts cleanly if it isn't.
+3. **CodeBuild → GitHub authorized** and your branch pushable to origin — every
+   round builds the scanner image from a pushed branch (README setup step 1).
+4. Start on a **clean `main`** — improving rounds auto-merge to it.
+
+**Args:**
+- `targetPct` (required) — absolute solve-rate % to reach (e.g. 22 = 22% of 113).
 - `auditorsPerRound` (default 3), `maxRounds` (default 5), `modules` (optional
   module allow-list), `dryRoundLimit` (default = maxRounds; set lower to stop
   after N consecutive no-gain rounds).
 - `teardown` (default true) — `terraform destroy` the AWS sandbox at the end of
   the run. Pass `false` to leave infra up (to inspect results or chain runs).
 
-Requires AWS infra up first (the run aborts cleanly if it isn't). All merges are
-pushed to origin before teardown, so nothing is lost when the sandbox is
-destroyed.
+All merges are pushed to origin before teardown, so nothing is lost when the
+sandbox is destroyed. Watch progress live with `/workflows`. A first run with
+`maxRounds: 1` is a good end-to-end shakedown before a longer session.

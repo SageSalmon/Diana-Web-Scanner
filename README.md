@@ -18,8 +18,8 @@ Diana takes a different approach:
 ## Quick Start
 
 ```bash
-# Clone and install
-git clone https://github.com/diana-scanner/diana.git
+# Clone and install (use your own fork's URL)
+git clone https://github.com/YOUR_ORG/diana.git
 cd diana
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
@@ -52,24 +52,47 @@ For full AI-enabled scanning with Amazon Bedrock, deploy the infrastructure:
 
 ### Prerequisites
 
-- AWS account with Bedrock model access (us-east-1 recommended)
+- AWS account with **Bedrock model access enabled** in your region (see [Getting Started](docs/GETTING_STARTED.md#aws-configuration) to verify)
+- AWS CLI configured with credentials (`aws sts get-caller-identity` should succeed)
 - Terraform >= 1.5
-- S3 bucket + DynamoDB table for Terraform state
+- A GitHub fork of this repo you can push to (CodeBuild builds the scanner image from your pushed branches)
+- A Route 53 hosted zone + domain, **only if** you want the public Diana API endpoint (the agent workflow does **not** need it — see note below)
 
 ### Setup
 
+**0. Bootstrap the Terraform state backend** (one-time, per account). The S3 state bucket and DynamoDB lock table must exist *before* `terraform init` — Terraform can't create its own backend:
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+aws s3api create-bucket --bucket "diana-terraform-state-$ACCOUNT_ID" --region us-east-1
+aws s3api put-bucket-versioning --bucket "diana-terraform-state-$ACCOUNT_ID" \
+  --versioning-configuration Status=Enabled
+aws dynamodb create-table --table-name diana-terraform-locks \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST --region us-east-1
+```
+
+**1. Authorize CodeBuild to pull from your GitHub repo** (one-time, per account). CodeBuild's source is your GitHub repo, so it needs a credential. Create a GitHub [personal access token](https://github.com/settings/tokens) with `repo` scope, then import it:
+
+```bash
+aws codebuild import-source-credentials --region us-east-1 \
+  --server-type GITHUB --auth-type PERSONAL_ACCESS_TOKEN --token "ghp_your_token"
+```
+
+> Without this, **every CodeBuild build fails** and no scan (manual or agent) can run — the whole pipeline builds the image from your branch. (Alternatively, manage this in Terraform by adding an `aws_codebuild_source_credential` resource.)
+
+**2. Configure the backend and variables** — copy the examples and fill in your values:
+
 ```bash
 cd tf/environments/dev
+cp backend.hcl.example backend.hcl          # set bucket to diana-terraform-state-<your-account-id>
+cp terraform.tfvars.example terraform.tfvars # set github_repo_url to YOUR fork, DB password, api_key, etc.
+```
 
-# 1. Configure backend — copy the example and fill in your values
-cp backend.hcl.example backend.hcl
-# Edit backend.hcl with your S3 bucket and region
+**3. Initialize and deploy:**
 
-# 2. Configure variables — copy the example and fill in your values
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your domain, DB password, API key, etc.
-
-# 3. Initialize and deploy
+```bash
 terraform init -backend-config=backend.hcl
 terraform apply
 ```
@@ -85,6 +108,10 @@ terraform apply
 | `github_repo_url` | Your fork's URL (for agent team CodeBuild) | `https://github.com/you/diana.git` |
 
 See [terraform.tfvars.example](tf/environments/dev/terraform.tfvars.example) for all options.
+
+> **`domain_name` / `hosted_zone_id`** provision the public Diana API endpoint (ALB + ACM cert). The **autonomous agent workflow does not use them** — each scan task runs its own Juice Shop sidecar at `localhost:3000`. If you only want the agent loop, you still need to set them today (they have no defaults); point them at any hosted zone you control, or edit the module to make the API endpoint optional.
+
+> **Model selection.** The scanner's built-in default is `deepseek.v3.2` (cheapest on Bedrock). The Terraform-deployed scanner uses `bedrock_model_id` (default `anthropic.claude-sonnet-4-6`). Set it to **any Bedrock model you have access-enabled** in your region — mismatched or un-enabled model IDs are the most common first-run failure.
 
 ### Cost Warning
 
@@ -159,7 +186,9 @@ The agent team runs a continuous improvement loop: scan a target, measure detect
 > **Autonomous mode:** the steps above are the manual/interactive loop. For a
 > hands-off run toward a solve-rate % target, the `juiceshop-solve-loop` workflow
 > parallelizes K module auditors per round, integrates, full-scans, auto-merges,
-> and repeats — see [docs/AGENTIC_SDLC.md](docs/AGENTIC_SDLC.md).
+> and repeats. It runs via the **Claude Code Workflow tool** (not a shell command)
+> and needs AWS infra up + CodeBuild authorized first — see
+> [docs/AGENTIC_SDLC.md § Running it](docs/AGENTIC_SDLC.md#running-it).
 
 ### The Agents
 

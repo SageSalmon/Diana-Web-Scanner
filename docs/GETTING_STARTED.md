@@ -12,9 +12,9 @@
 ### From Source
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/diana-scanner.git
-cd diana-scanner
+# Clone the repository (use your own fork's URL)
+git clone https://github.com/YOUR_ORG/diana.git
+cd diana
 
 # Create virtual environment
 python -m venv .venv
@@ -97,7 +97,10 @@ scan:
     - info_disclosure
 
 ai:
-  model_id: anthropic.claude-sonnet-4-6-20250514
+  # Any Bedrock model you have access-enabled in your region. The scanner's
+  # built-in default is "deepseek.v3.2" (cheapest); this repo's Terraform
+  # deploys "anthropic.claude-sonnet-4-6".
+  model_id: anthropic.claude-sonnet-4-6
   region: us-east-1
   max_tokens: 4096
 
