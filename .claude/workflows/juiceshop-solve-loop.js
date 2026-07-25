@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Gates', detail: 'generality + test-author + test-critic per branch' },
     { title: 'Tinyloop', detail: 'parallel single-module scans, each on its own Juice Shop sidecar' },
     { title: 'Integrate', detail: 'merge the green branches' },
+    { title: 'Smoke', detail: 'fast single-module scan of the integration image — fail fast on crashers before the 105-min full scan' },
     { title: 'BigScan', detail: 'one full validation; auto-merge to main if score rose with no regressions' },
     { title: 'Teardown', detail: 'terraform destroy the AWS sandbox at the end of the run' },
   ],
@@ -49,10 +50,11 @@ const pct = (n) => Math.round((n / TOTAL) * 1000) / 10
 // ---- Structured-output schemas --------------------------------------------
 const PREP_SCHEMA = {
   type: 'object', additionalProperties: false,
-  required: ['infra_up', 'baseline_solved', 'artifacts_bucket', 'notes'],
+  required: ['infra_up', 'baseline_solved', 'solved_challenges', 'artifacts_bucket', 'notes'],
   properties: {
     infra_up: { type: 'boolean', description: 'true only if terraform outputs resolve AND the ECS cluster + CodeBuild project exist' },
     baseline_solved: { type: 'integer', description: 'most recent known solved-challenge count (from newest agent-results/*/validation/results.json, else the chronicle baseline)' },
+    solved_challenges: { type: 'array', items: { type: 'string' }, description: 'the exact NAMES of challenges already solved at baseline (detection.solved_challenges), so the planner can avoid re-targeting them. Empty array if unknown.' },
     artifacts_bucket: { type: 'string' },
     notes: { type: 'string' },
   },
@@ -97,10 +99,19 @@ const GATE_SCHEMA = {
 }
 const TINYLOOP_SCHEMA = {
   type: 'object', additionalProperties: false,
-  required: ['flipped', 'flipped_challenges', 'detail'],
+  required: ['flipped', 'flipped_challenges', 'net_new_challenges', 'detail'],
   properties: {
-    flipped: { type: 'boolean', description: 'true if at least one target challenge went unsolved -> solved' },
-    flipped_challenges: { type: 'array', items: { type: 'string' } },
+    flipped: { type: 'boolean', description: 'true ONLY if at least one NET-NEW challenge (not in the provided already-solved list) went unsolved -> solved. Re-solving an already-solved challenge does NOT count.' },
+    flipped_challenges: { type: 'array', items: { type: 'string' }, description: 'all target challenges that went 0->solved in this fresh sidecar' },
+    net_new_challenges: { type: 'array', items: { type: 'string' }, description: 'the subset of flipped_challenges that are NOT already in the baseline solved list' },
+    detail: { type: 'string' },
+  },
+}
+const SMOKE_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['healthy', 'detail'],
+  properties: {
+    healthy: { type: 'boolean', description: 'true if the scan ran to completion without a crash/exception (AI payload generation, orchestrator, etc.). Flips are irrelevant here — this only checks the integrated image does not crash.' },
     detail: { type: 'string' },
   },
 }
@@ -118,7 +129,7 @@ const BIGSCAN_SCHEMA = {
   type: 'object', additionalProperties: false,
   required: ['solved', 'regressions', 'newly_solved', 'duration_s', 'detail'],
   properties: {
-    solved: { type: 'integer', description: 'challenges_solved from the full validation results.json' },
+    solved: { type: 'integer', description: 'challenges_solved from the full validation results.json; use -1 if the scan crashed/produced no results (so the round is treated as no-merge, not a regression to 0)' },
     regressions: { type: 'array', items: { type: 'string' }, description: 'challenges solved at baseline but NOT solved now' },
     newly_solved: { type: 'array', items: { type: 'string' } },
     duration_s: { type: 'number' },
@@ -137,9 +148,10 @@ const TEARDOWN_SCHEMA = {
 }
 
 // ---- One auditor: improve -> gates -> tiny-loop ----------------------------
-async function runAuditor(pick, round) {
+async function runAuditor(pick, round, solvedNames) {
   const branch = `auto/${pick.module}-r${round}`
   const label = `${pick.module}:r${round}`
+  const solvedSet = new Set((solvedNames || []).map(s => (s || '').toLowerCase()))
 
   const imp = await agent(
     `You are the Improvement Agent. Follow .claude/skills/agent-improvement/SKILL.md.
@@ -181,14 +193,23 @@ Return the branch, whether the diff touched the crawler set (git diff --name-onl
 
   const tl = await agent(
     `Follow .claude/skills/agent-tinyloop/SKILL.md for branch ${branch}, MODULES="${pick.module}", TARGET_CHALLENGES="${pick.target_challenges.join(',')}".
-First confirm the tiny-loop guard (diff must not touch the crawler set). Build from the remote branch, run the single-module scan against its own Juice Shop sidecar reusing a cached crawl, and report which target challenges flipped unsolved->solved.`,
+First confirm the tiny-loop guard (diff must not touch the crawler set). Build from the remote branch, run the single-module scan against its own Juice Shop sidecar reusing a cached crawl, and report which target challenges flipped unsolved->solved.
+
+IMPORTANT — net-new only: the sidecar starts at 0 solved, so a challenge that is ALREADY solved on main will also flip 0->solved here and must NOT be counted as a win. These challenges are already solved at baseline and DO NOT count as net-new: [${(solvedNames || []).join(', ') || 'none'}]. Report net_new_challenges = the flipped challenges NOT in that list, and set flipped=true ONLY if net_new_challenges is non-empty.
+
+IMPORTANT — no orphaned tasks: if you launch an ECS task, you MUST wait for it to reach a terminal state; if you give up or time out, STOP the task ('aws ecs stop-task --cluster diana-cluster --task <arn>') before returning so it does not keep running and billing.`,
     { label: `tinyloop:${label}`, phase: 'Tinyloop', agentType: 'agent-tinyloop', schema: TINYLOOP_SCHEMA },
   )
+  // Belt-and-suspenders: compute net-new here too, don't trust the flag alone.
+  const flippedCh = (tl && tl.flipped_challenges) || []
+  const netNew = ((tl && tl.net_new_challenges) || flippedCh).filter(c => !solvedSet.has((c || '').toLowerCase()))
+  const isWin = !!(tl && tl.flipped) && netNew.length > 0
   return {
     ...pick, branch,
-    flipped: !!(tl && tl.flipped),
-    flipped_challenges: (tl && tl.flipped_challenges) || [],
-    reason: tl && tl.flipped ? 'flipped' : 'no-flip',
+    flipped: isWin,
+    flipped_challenges: flippedCh,
+    net_new_challenges: netNew,
+    reason: isWin ? `net-new: ${netNew.join(', ')}` : (flippedCh.length ? 'only-already-solved' : 'no-flip'),
   }
 }
 
@@ -197,8 +218,8 @@ phase('Prep')
 const prep = await agent(
   `You are prepping an autonomous scanner-improvement loop.
 1. Verify AWS infra is UP: \`terraform -chdir=tf/environments/dev output -raw agent_artifacts_bucket\` resolves, the ECS cluster "diana-cluster" exists, and the CodeBuild project "diana-agent-build" exists. Set infra_up accordingly.
-2. Read the newest local agent-results/*/validation/results.json (detection.challenges_solved) for the current baseline solved count; if none exists, use the latest number in docs/CHRONICLE.md.
-Return infra_up, baseline_solved, the artifacts bucket, and any notes. Do NOT stand up or tear down infra.`,
+2. Read the newest local agent-results/*/validation/results.json: report detection.challenges_solved as baseline_solved AND the exact list of already-solved challenge NAMES from detection.solved_challenges as solved_challenges. If no results file exists, use the latest count in docs/CHRONICLE.md and return solved_challenges as an empty array.
+Return infra_up, baseline_solved, solved_challenges, the artifacts bucket, and any notes. Do NOT stand up or tear down infra.`,
   { label: 'prep', phase: 'Prep', schema: PREP_SCHEMA },
 )
 if (!prep || !prep.infra_up) {
@@ -208,7 +229,10 @@ if (!prep || !prep.infra_up) {
 
 let solved = prep.baseline_solved
 const startSolved = solved
-log(`Baseline: ${solved}/${TOTAL} (${pct(solved)}%). Target: ${TARGET_PCT}%. Auditors/round: ${AUDITORS}. Max rounds: ${MAX_ROUNDS}.`)
+// The set of already-solved challenge names — the planner and tiny-loops must
+// avoid counting these as wins. Updated after every successful merge.
+let solvedNames = prep.solved_challenges || []
+log(`Baseline: ${solved}/${TOTAL} (${pct(solved)}%). Target: ${TARGET_PCT}%. Auditors/round: ${AUDITORS}. Max rounds: ${MAX_ROUNDS}. Already solved: ${solvedNames.length} known.`)
 
 const merges = []
 let round = 0
@@ -223,15 +247,23 @@ while (pct(solved) < TARGET_PCT && round < MAX_ROUNDS && dry < DRY_LIMIT) {
   const plan = await agent(
     `You are selecting this round's parallel auditor work. Read agent-results/*/validation/gap-analysis.md (newest) and docs/CHRONICLE.md.
 Propose up to ${AUDITORS} MODULE-DISJOINT improvement opportunities (no two may edit the same scanner module) that are generic (help any web app) and NOT already tried-and-failed in the chronicle.${MODULE_HINT ? ' Prefer these modules: ' + MODULE_HINT.join(', ') + '.' : ''}
-For each: the single module, a title, the specific Juice Shop challenge names it should flip, and a one-line rationale.`,
+
+CRITICAL — target ONLY unsolved challenges. These challenges are ALREADY SOLVED and must NOT be targeted (re-solving them is worth zero): [${solvedNames.join(', ') || 'none known'}]. Every challenge in target_challenges must be one Diana does NOT already solve. If you cannot find unsolved challenges a module could plausibly flip, return fewer opportunities (or an empty list) rather than padding with already-solved ones.
+
+For each: the single module, a title, the specific UNSOLVED Juice Shop challenge names it should flip, and a one-line rationale.`,
     { label: `plan:r${round}`, phase: 'Plan', schema: PLAN_SCHEMA },
   )
-  const picks = ((plan && plan.opportunities) || []).slice(0, AUDITORS)
-  if (picks.length === 0) { log(`Round ${round}: planner found no opportunities. Stopping.`); break }
+  // Drop any opportunity whose targets are all already-solved (defensive).
+  const solvedLower = new Set(solvedNames.map(s => (s || '').toLowerCase()))
+  const picks = ((plan && plan.opportunities) || [])
+    .map(p => ({ ...p, target_challenges: (p.target_challenges || []).filter(c => !solvedLower.has((c || '').toLowerCase())) }))
+    .filter(p => p.target_challenges.length > 0)
+    .slice(0, AUDITORS)
+  if (picks.length === 0) { log(`Round ${round}: planner found no UNSOLVED opportunities. Stopping.`); break }
   log(`Round ${round}: ${picks.length} auditors — ${picks.map(p => p.module).join(', ')}`)
 
   // IMPROVE + GATES + TINYLOOP (parallel across auditors)
-  const results = (await parallel(picks.map(p => () => runAuditor(p, round)))).filter(Boolean)
+  const results = (await parallel(picks.map(p => () => runAuditor(p, round, solvedNames)))).filter(Boolean)
   const green = results.filter(r => r.flipped)
   log(`Round ${round}: ${green.length}/${picks.length} auditors flipped a target (${green.map(g => g.module).join(', ') || 'none'}).`)
   for (const r of results.filter(x => !x.flipped)) log(`  · ${r.module}: ${r.reason}`)
@@ -245,13 +277,31 @@ They are module-disjoint so merges should be clean; if any conflict is non-trivi
   )
   if (!integ || !integ.ok) { log(`Round ${round}: integration failed (${integ ? integ.detail : 'agent failed'}).`); dry++; continue }
 
+  // SMOKE — cheap single-module scan of the integrated image, to fail fast on a
+  // crasher (e.g. a bad AI-payload template that aborts the whole scan) BEFORE
+  // committing to a ~105-min full validation.
+  const smokeModule = green[0].module
+  const smoke = await agent(
+    `Smoke-test the integrated image on branch ${integ.branch} following .claude/skills/agent-tinyloop/SKILL.md with MODULES="${smokeModule}". Build from the remote branch and run the single-module scan on a cached crawl. You are NOT checking for flips — only that the scan RUNS TO COMPLETION with no crash/exception (watch for AI payload-generation errors, JSON decode errors, orchestrator tracebacks; "Scan completed successfully" or a normal Results Summary means healthy). Set healthy=false if the scan aborts with an error. If you launch an ECS task and give up/time out, STOP it (aws ecs stop-task) before returning.`,
+    { label: `smoke:r${round}`, phase: 'Smoke', agentType: 'agent-tinyloop', schema: SMOKE_SCHEMA },
+  )
+  if (!smoke || !smoke.healthy) {
+    log(`Round ${round}: SMOKE FAILED — integrated image crashes (${smoke ? smoke.detail : 'agent failed'}). Skipping full scan; not merging.`)
+    dry++; continue
+  }
+
   // BIG SCAN (full validation, merge gate)
   const val = await agent(
     `Run a FULL validation (all modules, fresh crawl) on branch ${integ.branch} following .claude/skills/agent-validation/SKILL.md. Build from the remote branch, run the ECS task, fetch results from S3.
-Report challenges_solved, the newly_solved list vs a baseline of ${solved}, and any regressions (challenges that were solved before but are not now). Also report scan duration.`,
+
+PATIENCE: a full validation takes ~90-110 minutes. Poll the ECS task until it reaches STOPPED (or ~130 min elapsed) — do NOT give up at 20-40 min. Fetch results.json from S3 with a few retries after the task stops (S3 write can lag the task exit).
+
+NO ORPHANED TASKS: you launched this ECS task — you own it. If you give up, time out, or hit an error, you MUST 'aws ecs stop-task --cluster diana-cluster --task <arn>' before returning, so it does not run unattended and bill.
+
+Report challenges_solved, the newly_solved list vs a baseline of ${solved}, and any regressions (challenges solved before but not now). Report duration_s. If the scan genuinely failed/crashed (no results), report solved=-1 so this round is treated as no-merge (NOT solved=0, which would look like a real regression).`,
     { label: `bigscan:r${round}`, phase: 'BigScan', agentType: 'agent-validation', schema: BIGSCAN_SCHEMA },
   )
-  if (!val) { log(`Round ${round}: big scan failed to return.`); dry++; continue }
+  if (!val || val.solved < 0) { log(`Round ${round}: big scan did not produce a valid result (${val ? val.detail : 'agent failed'}).`); dry++; continue }
 
   const improved = val.solved > solved
   const clean = (val.regressions || []).length === 0
@@ -263,8 +313,11 @@ Report challenges_solved, the newly_solved list vs a baseline of ${solved}, and 
     if (mg && mg.merged) {
       merges.push({ round, from: solved, to: val.solved, modules: green.map(g => g.module), newly_solved: val.newly_solved || [] })
       solved = val.solved
+      // Fold the newly-solved challenges into the exclusion set so next round's
+      // planner and tiny-loops don't re-target them.
+      solvedNames = [...solvedNames, ...(val.newly_solved || [])]
       dry = 0
-      log(`Round ${round}: MERGED. Now ${solved}/${TOTAL} (${pct(solved)}%).`)
+      log(`Round ${round}: MERGED. Now ${solved}/${TOTAL} (${pct(solved)}%). New: ${(val.newly_solved || []).join(', ') || '(count rose)'}.`)
     } else {
       log(`Round ${round}: merge step did not complete (${mg ? mg.detail : 'agent failed'}); integration branch ${integ.branch} left for review.`)
       dry++
@@ -286,7 +339,12 @@ let teardown = null
 if (TEARDOWN) {
   phase('Teardown')
   teardown = await agent(
-    `Tear down the AWS dev sandbox now that the solve-loop run is complete. Run \`terraform -chdir=tf/environments/dev destroy -input=false -auto-approve\` and confirm it prints "Destroy complete". All merges are already pushed to origin, so nothing is lost. Report ok=true only if destroy completed cleanly; otherwise ok=false with the error.`,
+    `Tear down the AWS dev sandbox now that the solve-loop run is complete. All merges are already pushed to origin, so nothing is lost. Do this IN ORDER and be patient — RDS/VPC deletion takes several minutes:
+
+1. STOP LEFTOVER TASKS FIRST (they bill and they block VPC/SG deletion): for each ARN in \`aws ecs list-tasks --cluster diana-cluster --region us-east-1 --query taskArns --output text\`, run \`aws ecs stop-task --cluster diana-cluster --region us-east-1 --task <arn>\`, then wait until \`aws ecs list-tasks --cluster diana-cluster\` returns zero tasks.
+2. Clear a stale state lock if present: if a later command reports a lock, run \`terraform -chdir=tf/environments/dev force-unlock -force <LOCK_ID>\`.
+3. \`terraform -chdir=tf/environments/dev destroy -input=false -auto-approve -lock-timeout=180s\` and WAIT for it to finish. If it errors on a DependencyViolation / ClusterContainsTasks, go back to step 1 (a task/ENI is still lingering), then re-run destroy. Retry up to ~5 times with short waits.
+4. VERIFY the end state before returning ok=true: \`terraform -chdir=tf/environments/dev state list\` is EMPTY and \`aws ecs list-tasks --cluster diana-cluster\` returns no tasks. Only then report ok=true. If anything is still up after your retries, report ok=false with exactly which resources/tasks remain so the operator can finish manually.`,
     { label: 'teardown', phase: 'Teardown', schema: TEARDOWN_SCHEMA },
   )
   log(teardown && teardown.ok ? `Teardown complete: ${teardown.detail}` : `TEARDOWN MAY HAVE FAILED — check AWS manually: ${teardown ? teardown.detail : 'agent failed'}`)

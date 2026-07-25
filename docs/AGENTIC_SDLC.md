@@ -29,11 +29,14 @@ flowchart TB
   plan["Plan agent: pick K module-disjoint opportunities"] --> auditors
   auditors["K parallel auditors — see fan-out diagram"] --> flip
 
-  flip{"any auditor flipped a target?"}
+  flip{"any auditor flipped a NET-NEW target?"}
   flip -- no --> roundEnd
   flip -- yes --> integ
-  integ["Integrate green branches, run unit suite"] --> big
-  big["Big scan: full validation, all modules, fresh crawl"] --> ok
+  integ["Integrate green branches, run unit suite"] --> smoke
+  smoke{"integrated image healthy? (fast smoke scan)"}
+  smoke -- "no, crashes" --> roundEnd
+  smoke -- yes --> big
+  big["Big scan: full validation, all modules, fresh crawl (poll ~105 min)"] --> ok
   ok{"solved count up AND zero regressions?"}
   ok -- no --> roundEnd
   ok -- yes --> land["Direct auto-merge to main + CHRONICLE checkin"]
@@ -50,7 +53,7 @@ flowchart TB
   classDef human fill:#059669,stroke:#065f46,color:#fff;
   class plan agent;
   class big,teardown aws;
-  class flip,ok,roundEnd gate;
+  class flip,ok,roundEnd,smoke gate;
   class op,land,done human;
 ```
 
@@ -114,6 +117,17 @@ concurrency is already 15, so K = 2 to 3 needs no infra change.
 
 ## Guardrails (limited human oversight)
 
+- **Target only unsolved challenges** — the planner is given the baseline's
+  already-solved list and must not re-target it; tiny-loops count a flip only if
+  it's **net-new** vs that list (a fresh sidecar starts at 0 solved, so an
+  already-solved challenge flips there too and must not score).
+- **Smoke before the big scan** — a fast single-module scan of the integrated
+  image catches a crasher (e.g. a bad AI-payload template) before committing to a
+  ~105-min full validation.
+- **No orphaned tasks** — any agent that launches an ECS task waits for terminal
+  state and stops the task if it gives up (a scan agent that quit early once left
+  a Fargate task billing for hours). Teardown stops leftover tasks, clears stale
+  state locks, and verifies zero resources/tasks before reporting success.
 - **Module-disjoint auditors** — no two edit the same scanner file (clean merges,
   clean attribution).
 - **Crawler-set changes are disqualified** from the fast tiny-loop
