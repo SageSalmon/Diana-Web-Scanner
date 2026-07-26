@@ -47,6 +47,18 @@ const CRAWLER_SET = ['src/diana/core/crawler.py', 'src/diana/core/spa_crawler.py
 
 const pct = (n) => Math.round((n / TOTAL) * 1000) / 10
 
+// Resilient agent call: a subagent that errors or finishes without producing its
+// structured output must NOT crash the whole workflow (which would also strand
+// AWS infra billing). Return null instead — every caller already handles null.
+async function safeAgent(prompt, opts) {
+  try {
+    return await agent(prompt, opts)
+  } catch (e) {
+    log(`agent [${(opts && opts.label) || '?'}] failed, treating as null: ${String(e && e.message || e).slice(0, 180)}`)
+    return null
+  }
+}
+
 // ---- Structured-output schemas --------------------------------------------
 const PREP_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -214,7 +226,7 @@ IMPORTANT — no orphaned tasks: if you launch an ECS task, you MUST wait for it
 
 // ---- Main loop -------------------------------------------------------------
 phase('Prep')
-const prep = await agent(
+const prep = await safeAgent(
   `You are prepping an autonomous scanner-improvement loop.
 1. Verify AWS infra is UP: \`terraform -chdir=tf/environments/dev output -raw agent_artifacts_bucket\` resolves, the ECS cluster "diana-cluster" exists, and the CodeBuild project "diana-agent-build" exists. Set infra_up accordingly.
 2. Determine the current baseline. The AUTHORITATIVE current solve count is the TOP (most recent) "## Round N" / "## Iteration N" entry in docs/CHRONICLE.md — it is updated on every merge, so trust it over any results.json (local result files may be stale or partial). Parse its "X/113" solved count and return it as baseline_solved.
@@ -244,7 +256,7 @@ while (pct(solved) < TARGET_PCT && round < MAX_ROUNDS && dry < DRY_LIMIT) {
   phase(`Round ${round}`)
 
   // PLAN
-  const plan = await agent(
+  const plan = await safeAgent(
     `You are selecting this round's parallel auditor work. Read agent-results/*/validation/gap-analysis.md (newest) and docs/CHRONICLE.md.
 Propose up to ${AUDITORS} MODULE-DISJOINT improvement opportunities (no two may edit the same scanner module) that are generic (help any web app) and NOT already tried-and-failed in the chronicle.${MODULE_HINT ? ' Prefer these modules: ' + MODULE_HINT.join(', ') + '.' : ''}
 
@@ -272,7 +284,7 @@ For each: the single module, a title, the specific UNSOLVED Juice Shop challenge
   // INTEGRATE — runs in its OWN worktree so it never moves the primary working
   // tree off main (an early run left the primary checked out on the integration
   // branch, stranding later commits). Fetch + merge the REMOTE auto/* branches.
-  const integ = await agent(
+  const integ = await safeAgent(
     `You are in a dedicated git worktree — do NOT touch or checkout branches in any other working tree. Create integration branch "auto/integration-r${round}" from origin/main (git fetch origin first) and merge these validated remote branches into it: ${green.map(g => 'origin/' + g.branch).join(', ')}.
 They are module-disjoint so merges should be clean; if any conflict is non-trivial, drop that branch and note it. Run the full unit suite (.venv/bin/python -m pytest tests/unit -q) and confirm it passes. Push the integration branch to origin (CodeBuild builds from the remote). Report the branch and which branches were actually merged. Do NOT check out or modify main.`,
     { label: `integrate:r${round}`, phase: 'Integrate', isolation: 'worktree', schema: INTEGRATE_SCHEMA },
@@ -283,7 +295,7 @@ They are module-disjoint so merges should be clean; if any conflict is non-trivi
   // crasher (e.g. a bad AI-payload template that aborts the whole scan) BEFORE
   // committing to a ~105-min full validation.
   const smokeModule = green[0].module
-  const smoke = await agent(
+  const smoke = await safeAgent(
     `Smoke-test the integrated image on branch ${integ.branch} following .claude/skills/agent-tinyloop/SKILL.md with MODULES="${smokeModule}". Build from the remote branch and run the single-module scan on a cached crawl. You are NOT checking for flips — only that the scan RUNS TO COMPLETION with no crash/exception (watch for AI payload-generation errors, JSON decode errors, orchestrator tracebacks; "Scan completed successfully" or a normal Results Summary means healthy). Set healthy=false if the scan aborts with an error. If you launch an ECS task and give up/time out, STOP it (aws ecs stop-task) before returning.`,
     { label: `smoke:r${round}`, phase: 'Smoke', agentType: 'agent-tinyloop', schema: SMOKE_SCHEMA },
   )
@@ -293,10 +305,10 @@ They are module-disjoint so merges should be clean; if any conflict is non-trivi
   }
 
   // BIG SCAN (full validation, merge gate)
-  const val = await agent(
+  const val = await safeAgent(
     `Run a FULL validation (all modules, fresh crawl) on branch ${integ.branch} following .claude/skills/agent-validation/SKILL.md. Build from the remote branch, run the ECS task, fetch results from S3.
 
-PATIENCE: a full validation takes ~90-110 minutes. Poll the ECS task until it reaches STOPPED (or ~130 min elapsed) — do NOT give up at 20-40 min. Fetch results.json from S3 with a few retries after the task stops (S3 write can lag the task exit).
+PATIENCE (turn budget matters): a full validation takes ~90-110 minutes, but you have a LIMITED number of turns — do NOT poll in a tight loop or you will run out of turns before the scan finishes (that strands the task and produces no output). Poll SPARSELY: 'sleep 300' (5 minutes) between each single 'aws ecs describe-tasks' status check, ~24 checks max, until the task reaches STOPPED (or ~130 min elapsed). Do NOT give up at 20-40 min. After it stops, fetch results.json from S3 with a few retries (S3 write can lag task exit). You MUST end by calling your StructuredOutput tool — if you are running low on turns, stop polling and report what you have (solved=-1 if no results yet).
 
 NO ORPHANED TASKS: you launched this ECS task — you own it. If you give up, time out, or hit an error, you MUST 'aws ecs stop-task --cluster diana-cluster --task <arn>' before returning, so it does not run unattended and bill.
 
@@ -315,7 +327,7 @@ Report challenges_solved as 'solved' and the EXACT full list of solved challenge
   const improved = val.solved > solved
   const clean = regressions.length === 0
   if (improved && clean) {
-    const mg = await agent(
+    const mg = await safeAgent(
       `In the PRIMARY working tree (do not create a worktree): 'git fetch origin', 'git checkout main', 'git merge --no-ff origin/${integ.branch}', resolve trivially if needed, then append a Chronicle entry to docs/CHRONICLE.md summarizing round ${round}: solve rate ${pct(solved)}% -> ${pct(val.solved)}% (+${val.solved - solved}), modules ${green.map(g => g.module).join(', ')}, newly solved ${newlySolved.join(', ') || '(count rose)'}. Commit the chronicle on main, then 'git push origin main'. Leave the working tree checked out on main. Report merged=true only after the push to main succeeds.`,
       { label: `merge:r${round}`, phase: 'BigScan', schema: MERGE_SCHEMA },
     )
@@ -347,7 +359,7 @@ log(`DONE after ${round} round(s). ${startSolved} -> ${solved}/${TOTAL} (${pct(s
 let teardown = null
 if (TEARDOWN) {
   phase('Teardown')
-  teardown = await agent(
+  teardown = await safeAgent(
     `Tear down the AWS dev sandbox now that the solve-loop run is complete. All merges are already pushed to origin, so nothing is lost. Your #1 job is that NO BILLABLE resource is left running (RDS/Aurora, ElastiCache Redis, ALB, NAT gateway, ECS tasks). Be patient and persistent — **Aurora cluster deletion alone takes ~8-12 minutes**, longer than a single command; do NOT give up early.
 
 1. STOP LEFTOVER TASKS FIRST (they bill and block VPC/SG deletion): for each ARN in \`aws ecs list-tasks --cluster diana-cluster --region us-east-1 --query taskArns --output text\`, run \`aws ecs stop-task --cluster diana-cluster --region us-east-1 --task <arn>\`, then wait until zero tasks remain.
