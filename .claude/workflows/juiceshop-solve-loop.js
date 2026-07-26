@@ -217,8 +217,9 @@ phase('Prep')
 const prep = await agent(
   `You are prepping an autonomous scanner-improvement loop.
 1. Verify AWS infra is UP: \`terraform -chdir=tf/environments/dev output -raw agent_artifacts_bucket\` resolves, the ECS cluster "diana-cluster" exists, and the CodeBuild project "diana-agent-build" exists. Set infra_up accordingly.
-2. Read the newest local agent-results/*/validation/results.json: report detection.challenges_solved as baseline_solved AND the exact list of already-solved challenge NAMES from detection.solved_challenges as solved_challenges. If no results file exists, use the latest count in docs/CHRONICLE.md and return solved_challenges as an empty array.
-Return infra_up, baseline_solved, solved_challenges, the artifacts bucket, and any notes. Do NOT stand up or tear down infra.`,
+2. Determine the current baseline. The AUTHORITATIVE current solve count is the TOP (most recent) "## Round N" / "## Iteration N" entry in docs/CHRONICLE.md — it is updated on every merge, so trust it over any results.json (local result files may be stale or partial). Parse its "X/113" solved count and return it as baseline_solved.
+3. For solved_challenges NAMES, read the newest agent-results/*/validation/results.json that has a NON-EMPTY detection.solved_challenges and whose detection.challenges_solved is <= baseline_solved (ignore obviously-partial files); return those names. It's OK if this list is slightly shorter than baseline_solved — the loop self-corrects after the first merge. If none is usable, return an empty array and note it.
+Return infra_up, baseline_solved (from the chronicle), solved_challenges, the artifacts bucket, and any notes. Do NOT stand up or tear down infra.`,
   { label: 'prep', phase: 'Prep', schema: PREP_SCHEMA },
 )
 if (!prep || !prep.infra_up) {
