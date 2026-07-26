@@ -127,11 +127,10 @@ const INTEGRATE_SCHEMA = {
 }
 const BIGSCAN_SCHEMA = {
   type: 'object', additionalProperties: false,
-  required: ['solved', 'regressions', 'newly_solved', 'duration_s', 'detail'],
+  required: ['solved', 'solved_challenges', 'duration_s', 'detail'],
   properties: {
     solved: { type: 'integer', description: 'challenges_solved from the full validation results.json; use -1 if the scan crashed/produced no results (so the round is treated as no-merge, not a regression to 0)' },
-    regressions: { type: 'array', items: { type: 'string' }, description: 'challenges solved at baseline but NOT solved now' },
-    newly_solved: { type: 'array', items: { type: 'string' } },
+    solved_challenges: { type: 'array', items: { type: 'string' }, description: 'the EXACT names of every challenge solved in this scan (detection.solved_challenges verbatim). The workflow computes newly-solved and regressions from this — do not pre-diff it.' },
     duration_s: { type: 'number' },
     detail: { type: 'string' },
   },
@@ -300,32 +299,39 @@ PATIENCE: a full validation takes ~90-110 minutes. Poll the ECS task until it re
 
 NO ORPHANED TASKS: you launched this ECS task — you own it. If you give up, time out, or hit an error, you MUST 'aws ecs stop-task --cluster diana-cluster --task <arn>' before returning, so it does not run unattended and bill.
 
-Report challenges_solved, the newly_solved list vs a baseline of ${solved}, and any regressions (challenges solved before but not now). Report duration_s. If the scan genuinely failed/crashed (no results), report solved=-1 so this round is treated as no-merge (NOT solved=0, which would look like a real regression).`,
+Report challenges_solved as 'solved' and the EXACT full list of solved challenge names (detection.solved_challenges, verbatim) as 'solved_challenges' — do NOT diff or filter it, the workflow computes newly-solved/regressions itself. Report duration_s. If the scan genuinely failed/crashed (no results), report solved=-1 and solved_challenges=[] so this round is treated as no-merge (NOT solved=0, which would look like a real regression).`,
     { label: `bigscan:r${round}`, phase: 'BigScan', agentType: 'agent-validation', schema: BIGSCAN_SCHEMA },
   )
   if (!val || val.solved < 0) { log(`Round ${round}: big scan did not produce a valid result (${val ? val.detail : 'agent failed'}).`); dry++; continue }
 
+  // Compute newly-solved and regressions IN CODE from the full solved list vs the
+  // tracked baseline — don't trust the agent to diff (it mislabeled once).
+  const scanSolved = val.solved_challenges || []
+  const scanSet = new Set(scanSolved.map(c => (c || '').toLowerCase()))
+  const baseSet = new Set(solvedNames.map(c => (c || '').toLowerCase()))
+  const newlySolved = scanSolved.filter(c => !baseSet.has((c || '').toLowerCase()))
+  const regressions = solvedNames.filter(c => !scanSet.has((c || '').toLowerCase()))
   const improved = val.solved > solved
-  const clean = (val.regressions || []).length === 0
+  const clean = regressions.length === 0
   if (improved && clean) {
     const mg = await agent(
-      `In the PRIMARY working tree (do not create a worktree): 'git fetch origin', 'git checkout main', 'git merge --no-ff origin/${integ.branch}', resolve trivially if needed, then append a Chronicle entry to docs/CHRONICLE.md summarizing round ${round}: solve rate ${pct(solved)}% -> ${pct(val.solved)}% (+${val.solved - solved}), modules ${green.map(g => g.module).join(', ')}, newly solved ${(val.newly_solved || []).join(', ')}. Commit the chronicle on main, then 'git push origin main'. Leave the working tree checked out on main. Report merged=true only after the push to main succeeds.`,
+      `In the PRIMARY working tree (do not create a worktree): 'git fetch origin', 'git checkout main', 'git merge --no-ff origin/${integ.branch}', resolve trivially if needed, then append a Chronicle entry to docs/CHRONICLE.md summarizing round ${round}: solve rate ${pct(solved)}% -> ${pct(val.solved)}% (+${val.solved - solved}), modules ${green.map(g => g.module).join(', ')}, newly solved ${newlySolved.join(', ') || '(count rose)'}. Commit the chronicle on main, then 'git push origin main'. Leave the working tree checked out on main. Report merged=true only after the push to main succeeds.`,
       { label: `merge:r${round}`, phase: 'BigScan', schema: MERGE_SCHEMA },
     )
     if (mg && mg.merged) {
-      merges.push({ round, from: solved, to: val.solved, modules: green.map(g => g.module), newly_solved: val.newly_solved || [] })
+      merges.push({ round, from: solved, to: val.solved, modules: green.map(g => g.module), newly_solved: newlySolved })
       solved = val.solved
-      // Fold the newly-solved challenges into the exclusion set so next round's
-      // planner and tiny-loops don't re-target them.
-      solvedNames = [...solvedNames, ...(val.newly_solved || [])]
+      // Adopt the scan's full solved set as the authoritative new baseline, so
+      // next round's planner and tiny-loops exclude everything now solved.
+      solvedNames = scanSolved
       dry = 0
-      log(`Round ${round}: MERGED. Now ${solved}/${TOTAL} (${pct(solved)}%). New: ${(val.newly_solved || []).join(', ') || '(count rose)'}.`)
+      log(`Round ${round}: MERGED. Now ${solved}/${TOTAL} (${pct(solved)}%). New: ${newlySolved.join(', ') || '(count rose)'}.`)
     } else {
       log(`Round ${round}: merge step did not complete (${mg ? mg.detail : 'agent failed'}); integration branch ${integ.branch} left for review.`)
       dry++
     }
   } else {
-    log(`Round ${round}: not merging — improved=${improved} (solved ${val.solved} vs ${solved}), regressions=${(val.regressions || []).join(', ') || 'none'}. Branch ${integ.branch} left for review.`)
+    log(`Round ${round}: not merging — improved=${improved} (solved ${val.solved} vs ${solved}), regressions=${regressions.join(', ') || 'none'}. Branch ${integ.branch} left for review.`)
     dry++
   }
 }
@@ -341,12 +347,13 @@ let teardown = null
 if (TEARDOWN) {
   phase('Teardown')
   teardown = await agent(
-    `Tear down the AWS dev sandbox now that the solve-loop run is complete. All merges are already pushed to origin, so nothing is lost. Do this IN ORDER and be patient — RDS/VPC deletion takes several minutes:
+    `Tear down the AWS dev sandbox now that the solve-loop run is complete. All merges are already pushed to origin, so nothing is lost. Your #1 job is that NO BILLABLE resource is left running (RDS/Aurora, ElastiCache Redis, ALB, NAT gateway, ECS tasks). Be patient and persistent — **Aurora cluster deletion alone takes ~8-12 minutes**, longer than a single command; do NOT give up early.
 
-1. STOP LEFTOVER TASKS FIRST (they bill and they block VPC/SG deletion): for each ARN in \`aws ecs list-tasks --cluster diana-cluster --region us-east-1 --query taskArns --output text\`, run \`aws ecs stop-task --cluster diana-cluster --region us-east-1 --task <arn>\`, then wait until \`aws ecs list-tasks --cluster diana-cluster\` returns zero tasks.
-2. Clear a stale state lock if present: if a later command reports a lock, run \`terraform -chdir=tf/environments/dev force-unlock -force <LOCK_ID>\`.
-3. \`terraform -chdir=tf/environments/dev destroy -input=false -auto-approve -lock-timeout=180s\` and WAIT for it to finish. If it errors on a DependencyViolation / ClusterContainsTasks, go back to step 1 (a task/ENI is still lingering), then re-run destroy. Retry up to ~5 times with short waits.
-4. VERIFY the end state before returning ok=true: \`terraform -chdir=tf/environments/dev state list\` is EMPTY and \`aws ecs list-tasks --cluster diana-cluster\` returns no tasks. Only then report ok=true. If anything is still up after your retries, report ok=false with exactly which resources/tasks remain so the operator can finish manually.`,
+1. STOP LEFTOVER TASKS FIRST (they bill and block VPC/SG deletion): for each ARN in \`aws ecs list-tasks --cluster diana-cluster --region us-east-1 --query taskArns --output text\`, run \`aws ecs stop-task --cluster diana-cluster --region us-east-1 --task <arn>\`, then wait until zero tasks remain.
+2. Clear a stale state lock if any command reports one: \`terraform -chdir=tf/environments/dev force-unlock -force <LOCK_ID>\`.
+3. Run \`terraform -chdir=tf/environments/dev destroy -input=false -auto-approve -lock-timeout=180s\`. If your command environment cuts it off before it finishes, that's expected for the Aurora wait — simply RE-RUN the same destroy (it resumes); repeat up to ~8 times, waiting ~60s between attempts, until \`terraform state list\` is empty. On DependencyViolation/ClusterContainsTasks, go back to step 1 then re-run.
+4. FALLBACK if terraform still can't remove RDS after several retries: delete it directly so billing stops — \`aws rds delete-db-instance --db-instance-identifier diana-db-0 --skip-final-snapshot --delete-automated-backups --region us-east-1\` then \`aws rds delete-db-cluster --db-cluster-identifier diana-db --skip-final-snapshot --region us-east-1\`; then resume terraform destroy for the rest.
+5. VERIFY before returning: report ok=true ONLY when ALL of these are empty — \`terraform state list\`, \`aws ecs list-tasks --cluster diana-cluster\`, \`aws rds describe-db-clusters --query "DBClusters[?contains(DBClusterIdentifier,'diana')]"\`, \`aws elasticache describe-replication-groups --query "ReplicationGroups[?contains(ReplicationGroupId,'diana')]"\`, and \`aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName,'diana')]"\`. Otherwise ok=false, and in detail list EXACTLY which billable resources remain so the operator can finish them.`,
     { label: 'teardown', phase: 'Teardown', schema: TEARDOWN_SCHEMA },
   )
   log(teardown && teardown.ok ? `Teardown complete: ${teardown.detail}` : `TEARDOWN MAY HAVE FAILED — check AWS manually: ${teardown ? teardown.detail : 'agent failed'}`)
