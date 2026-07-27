@@ -447,6 +447,16 @@ class ScanOrchestrator:
                 dedup_key = ""  # Will default to method|url|auth in enqueue()
 
                 if module in ("sqli", "sqli_agent"):
+                    # Feed observed JSON request bodies (captured from XHR during
+                    # the SPA crawl) so the module can inject document-DB (NoSQL)
+                    # operator objects into each field. Generic to any JSON API.
+                    if ep.request_body:
+                        self.state.enqueue(
+                            self.scan_id, module, "crawler",
+                            ep.url, ep.method, auth_context="admin",
+                            payload={"request_body": ep.request_body},
+                            dedup_key=f"{ep.method}|{ep.url}|body|admin",
+                        )
                     if has_params:
                         for param in param_names:
                             self.state.enqueue(
