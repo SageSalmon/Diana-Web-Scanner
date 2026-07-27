@@ -1,5 +1,33 @@
 # Diana Agent Team — Chronicle
 
+## Salvage — SQLi login-injection, NoSQL kept (2026-07-27) ✓ MERGED — 20% target reached
+
+**Solve rate: 18.6% → 20.4% (21/113 → 23/113, +2 net)**  |  Modules: `sqli`
+**Newly solved: Login Bender, Login Jim**  |  Zero regressions. Full scan ~84 min.
+
+Reached the 20% goal. This is a **salvage** of an autonomous-run improvement:
+round 2 of the third solve-loop run produced `auto/sqli-r2`, which flipped
+*Login Bender* + *Login Jim* via an email-harvest → targeted SQLi login-injection,
+but it was a rewrite that (a) deleted the entire NoSQL injection module and
+(b) targeted up to 25 harvested accounts, pushing the full validation past its
+2-hour cap so the loop's merge gate never confirmed it (`solved=-1` timeout).
+
+The salvage (`salvage/sqli-login-injection`) grafts only the login-injection
+feature onto `main`, **keeping all NoSQL detection**, and bounds
+`MAX_TARGETED_ACCOUNTS` to 8 so the full scan finishes in ~84 min. Login primitive
+is the generic `{email}'--` comment-out applied to dynamically-harvested accounts
+— no account names hardcoded (Generality PASS). 153 unit tests pass (NoSQL suite
+retained). Full AWS validation: 21→23/113, both targets flipped, zero regressions.
+
+**Loop lesson:** across three 5-round autonomous runs the loop found real
+improvements (+2 SDE in run 2, +2 SQLi here) but its per-round full-scan gate is
+the weak point — it timed out / crashed on the exact rounds that found gains, so
+merges were lost and recovered by hand. The autonomous engine surfaces candidates
+well; the validation/merge gate needs the reliability work (bounded scan cost,
+patient non-crashing big-scan) before it's hands-off-trustworthy.
+
+---
+
 ## Round 2 — Sensitive Data Exposure nested-dir probing (2026-07-25) ✓ MERGED
 
 **Solve rate: 16.8% → 18.6% (19/113 → 21/113, +2 net)**  |  Modules: `sensitive_data_exposure`
