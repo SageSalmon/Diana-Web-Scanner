@@ -104,8 +104,23 @@ flowchart TB
 | Gates (xK) | `agent-generality` / `agent-test-author` / `agent-test-critic` | local | Sonnet |
 | Tiny-loop (xK) | `agent-tinyloop`, parallel | **AWS** — each its own Juice Shop sidecar | Haiku |
 | Integrate | subagent | local git | inherit |
-| Big scan | `agent-validation` | **AWS** — full fresh-crawl scan | Haiku |
+| Big scan | `agent-validation`, **decomposed** (launch → workflow-polls → fetch) | **AWS** — full fresh-crawl scan | Haiku |
 | Land + checkin | subagent | git to `main` | inherit |
+
+## The big-scan is decomposed (why the gate is reliable)
+
+The ~90–110 min full validation is **not** babysat by a single agent (that pattern
+kept failing — turn-exhaustion, early give-up, orphaned billing tasks). Instead:
+
+1. a short **launch** agent builds the image and starts the ECS task, returning the
+   task ARN in minutes;
+2. the **workflow itself drives the wait** — a loop of short poll agents, each doing
+   one 5-min sleep + one status check (none blocks longer than ~5 min);
+3. a short **fetch** agent parses the finished `results.json`.
+
+No agent holds its breath for two hours. On any failure the task is stopped
+(no billing leak) and the round is treated as no-merge (`solved=-1`), never a
+false regression.
 
 ## Why the parallelism is safe (no shared-target contamination)
 

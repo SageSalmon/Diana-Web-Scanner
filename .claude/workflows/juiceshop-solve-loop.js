@@ -10,7 +10,7 @@ export const meta = {
     { title: 'Tinyloop', detail: 'parallel single-module scans, each on its own Juice Shop sidecar' },
     { title: 'Integrate', detail: 'merge the green branches' },
     { title: 'Smoke', detail: 'fast single-module scan of the integration image — fail fast on crashers before the 105-min full scan' },
-    { title: 'BigScan', detail: 'one full validation; auto-merge to main if score rose with no regressions' },
+    { title: 'BigScan', detail: 'full validation (launch -> workflow polls -> fetch); auto-merge to main if score rose with no regressions' },
     { title: 'Teardown', detail: 'terraform destroy the AWS sandbox at the end of the run' },
   ],
 }
@@ -44,6 +44,10 @@ const TEARDOWN = !(A.teardown === false)
 const MODULE_HINT = A.modules || null                        // optional explicit module list
 const TOTAL = 113
 const CRAWLER_SET = ['src/diana/core/crawler.py', 'src/diana/core/spa_crawler.py', 'src/diana/core/models.py']
+// Full-scan poll budget: the workflow (not a single long-lived agent) drives the
+// wait. Each poll agent does one 5-min sleep + one check, so MAX_POLLS * ~5 min
+// bounds how long we wait for a ~90-110 min scan before giving up.
+const MAX_POLLS = 30
 
 const pct = (n) => Math.round((n / TOTAL) * 1000) / 10
 
@@ -147,6 +151,25 @@ const BIGSCAN_SCHEMA = {
     detail: { type: 'string' },
   },
 }
+// Decomposed full-scan schemas (launch -> poll -> fetch), so no single agent
+// babysits the ~105-min validation.
+const LAUNCH_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['ok', 'task_arn', 'detail'],
+  properties: {
+    ok: { type: 'boolean', description: 'true if the image built and the ECS validation task was launched (RUNNING/PENDING)' },
+    task_arn: { type: 'string', description: 'the launched ECS task ARN (empty if ok=false)' },
+    detail: { type: 'string' },
+  },
+}
+const POLL_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['state', 'detail'],
+  properties: {
+    state: { type: 'string', enum: ['ready', 'running', 'stopped_no_results', 'error'], description: 'ready=results.json exists in S3; running=task not terminal and no results yet; stopped_no_results=task STOPPED but no results object; error=the AWS checks failed' },
+    detail: { type: 'string' },
+  },
+}
 const MERGE_SCHEMA = {
   type: 'object', additionalProperties: false,
   required: ['merged', 'detail'],
@@ -222,6 +245,56 @@ IMPORTANT — no orphaned tasks: if you launch an ECS task, you MUST wait for it
     net_new_challenges: netNew,
     reason: isWin ? `net-new: ${netNew.join(', ')}` : (flippedCh.length ? 'only-already-solved' : 'no-flip'),
   }
+}
+
+// ---- Full validation, DECOMPOSED ------------------------------------------
+// launch (short) -> workflow-driven poll loop (short agents) -> fetch (short).
+// No single agent babysits the ~105-min scan, so it can't die of turn-exhaustion
+// or leave an orphaned task. Returns a BIGSCAN_SCHEMA-shaped object (solved=-1 on
+// any failure, so the round is treated as no-merge, never a false regression).
+async function runFullValidation(branch, round, bucket) {
+  const runId = `bigscan-r${round}`
+  const resultsKey = `s3://${bucket}/${runId}/validation/results.json`
+
+  // 1) LAUNCH — build image from the remote branch, start the ECS task, return.
+  const launch = await safeAgent(
+    `Launch (do NOT wait for) a FULL validation scan for branch ${branch}, following .claude/skills/agent-validation/SKILL.md, using run-id "${runId}". Steps: trigger the CodeBuild build from the remote branch and wait ONLY until the build reaches SUCCEEDED (~3-6 min); then launch the ECS validation task (all modules, fresh crawl) and capture its task ARN. Return ok=true with task_arn. Do NOT poll the scan or fetch results — that is handled separately. If the build fails or the task will not start, ok=false with the error.`,
+    { label: `bigscan-launch:r${round}`, phase: 'BigScan', agentType: 'agent-validation', schema: LAUNCH_SCHEMA },
+  )
+  if (!launch || !launch.ok || !launch.task_arn) {
+    return { solved: -1, solved_challenges: [], duration_s: 0, detail: `launch failed: ${launch ? launch.detail : 'agent error'}` }
+  }
+  const taskArn = launch.task_arn
+
+  // 2) POLL — the workflow drives the wait; each poll agent does ONE 5-min sleep
+  //    plus one status check, so no agent blocks longer than ~5 min.
+  let ready = false, dead = false, deadDetail = ''
+  for (let i = 0; i < MAX_POLLS && !ready && !dead; i++) {
+    const p = await safeAgent(
+      `Poll ONE iteration for a running validation scan (do exactly one sleep + one check, do NOT loop). First: 'sleep 300' (5 minutes). Then, with single quick AWS calls: (a) 'aws s3 ls ${resultsKey}' — does the results object exist? (b) 'aws ecs describe-tasks --cluster diana-cluster --region us-east-1 --tasks ${taskArn} --query "tasks[0].lastStatus" --output text' — is the task terminal? Report state = "ready" if the results object exists; "stopped_no_results" if lastStatus is STOPPED but the results object does NOT exist; "running" otherwise; "error" only if the AWS calls themselves fail.`,
+      { label: `bigscan-poll:r${round}.${i}`, phase: 'BigScan', agentType: 'agent-validation', schema: POLL_SCHEMA },
+    )
+    if (!p) continue // transient agent failure — just retry the next poll
+    if (p.state === 'ready') ready = true
+    else if (p.state === 'stopped_no_results') { dead = true; deadDetail = p.detail }
+    // 'running' or 'error' -> loop again (error is treated as transient/retry)
+  }
+
+  if (!ready) {
+    // Stop the task so it can't keep billing, then treat the round as no-merge.
+    await safeAgent(
+      `A validation scan did not produce results. Stop its ECS task so it stops billing: 'aws ecs stop-task --cluster diana-cluster --region us-east-1 --task ${taskArn} --reason "solve-loop: scan did not complete"'. Report done.`,
+      { label: `bigscan-stop:r${round}`, phase: 'BigScan', agentType: 'agent-validation' },
+    )
+    return { solved: -1, solved_challenges: [], duration_s: 0, detail: dead ? `scan stopped without results: ${deadDetail}` : 'poll cap reached before results appeared' }
+  }
+
+  // 3) FETCH — parse the finished results.json into the merge-gate shape.
+  const fetched = await safeAgent(
+    `Fetch and parse the completed validation results for run "${runId}": download ${resultsKey}. Report solved = detection.challenges_solved (integer), solved_challenges = the EXACT names in detection.solved_challenges verbatim (if entries are objects, use their "name" field; do NOT diff or filter), and duration_s = the scan duration if present. If the file is missing or unparseable, report solved=-1 and solved_challenges=[].`,
+    { label: `bigscan-fetch:r${round}`, phase: 'BigScan', agentType: 'agent-validation', schema: BIGSCAN_SCHEMA },
+  )
+  return fetched || { solved: -1, solved_challenges: [], duration_s: 0, detail: 'fetch agent returned nothing' }
 }
 
 // ---- Main loop -------------------------------------------------------------
@@ -304,17 +377,8 @@ They are module-disjoint so merges should be clean; if any conflict is non-trivi
     dry++; continue
   }
 
-  // BIG SCAN (full validation, merge gate)
-  const val = await safeAgent(
-    `Run a FULL validation (all modules, fresh crawl) on branch ${integ.branch} following .claude/skills/agent-validation/SKILL.md. Build from the remote branch, run the ECS task, fetch results from S3.
-
-PATIENCE (turn budget matters): a full validation takes ~90-110 minutes, but you have a LIMITED number of turns — do NOT poll in a tight loop or you will run out of turns before the scan finishes (that strands the task and produces no output). Poll SPARSELY: 'sleep 300' (5 minutes) between each single 'aws ecs describe-tasks' status check, ~24 checks max, until the task reaches STOPPED (or ~130 min elapsed). Do NOT give up at 20-40 min. After it stops, fetch results.json from S3 with a few retries (S3 write can lag task exit). You MUST end by calling your StructuredOutput tool — if you are running low on turns, stop polling and report what you have (solved=-1 if no results yet).
-
-NO ORPHANED TASKS: you launched this ECS task — you own it. If you give up, time out, or hit an error, you MUST 'aws ecs stop-task --cluster diana-cluster --task <arn>' before returning, so it does not run unattended and bill.
-
-Report challenges_solved as 'solved' and the EXACT full list of solved challenge names (detection.solved_challenges, verbatim) as 'solved_challenges' — do NOT diff or filter it, the workflow computes newly-solved/regressions itself. Report duration_s. If the scan genuinely failed/crashed (no results), report solved=-1 and solved_challenges=[] so this round is treated as no-merge (NOT solved=0, which would look like a real regression).`,
-    { label: `bigscan:r${round}`, phase: 'BigScan', agentType: 'agent-validation', schema: BIGSCAN_SCHEMA },
-  )
+  // BIG SCAN (full validation, merge gate) — decomposed: launch -> poll -> fetch.
+  const val = await runFullValidation(integ.branch, round, prep.artifacts_bucket)
   if (!val || val.solved < 0) { log(`Round ${round}: big scan did not produce a valid result (${val ? val.detail : 'agent failed'}).`); dry++; continue }
 
   // Compute newly-solved and regressions IN CODE from the full solved list vs the
