@@ -228,6 +228,7 @@ See [docs/AGENT_TEAM_PLAN.md](docs/AGENT_TEAM_PLAN.md) for the full design and [
 - [Getting Started](docs/GETTING_STARTED.md) — installation and usage
 - [API Reference](docs/API.md) — REST API documentation
 - [Agent Team Plan](docs/AGENT_TEAM_PLAN.md) — autonomous improvement agent design
+- [Agent Team diagram](docs/agent-team/index.html) — who makes what and who grades it; open the HTML file in a browser
 - [Chronicle](docs/CHRONICLE.md) — iteration history and metrics
 - [RAG Optimization](docs/FUTURE_RAG_OPTIMIZATION.md) — future context optimization design
 

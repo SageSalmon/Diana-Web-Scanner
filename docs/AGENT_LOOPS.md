@@ -8,6 +8,9 @@ and the personas that run them.
 > [CHRONICLE.md](CHRONICLE.md) (iteration history),
 > [AGENTIC_SDLC.md](AGENTIC_SDLC.md) (the autonomous parallel-auditor loop). This
 > doc is about the *process* — the loops and the agents that walk them.
+>
+> A one-page diagram of the makers, the graders, and the rule that no agent grades
+> its own work: [agent-team/index.html](agent-team/index.html) (open in a browser).
 
 > **Fully autonomous mode:** the two loops below are the manual/interactive
 > primitives. [AGENTIC_SDLC.md](AGENTIC_SDLC.md) composes them into a hands-off

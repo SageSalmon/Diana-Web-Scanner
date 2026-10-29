@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Diana Agent Team</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: one wide figure first (makers above, graders below), then a card per agent, then the grading matrix. */
+  :root {
+    --bg: #f2f4f6;
+    --surface: #ffffff;
+    --fg: #182230;
+    --muted: #5b6878;
+    --line: #c9d1da;
+    --maker: #0e6b8a;        /* agents that produce something */
+    --maker-soft: #dcecf3;
+    --grader: #a24a0b;       /* agents that grade someone else's output */
+    --grader-soft: #f7e3d2;
+    --human: #3b3f8f;
+    --human-soft: #e2e2f5;
+    --fail: #8a2b2b;
+    --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+    --body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10161d; --surface: #182029; --fg: #e4e9ee; --muted: #9aa7b4; --line: #2e3a47;
+      --maker: #5ec2e3; --maker-soft: #143545; --grader: #f0a35a; --grader-soft: #3d2a17;
+      --human: #a7a9f0; --human-soft: #26284a; --fail: #f08a8a; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #10161d; --surface: #182029; --fg: #e4e9ee; --muted: #9aa7b4; --line: #2e3a47;
+    --maker: #5ec2e3; --maker-soft: #143545; --grader: #f0a35a; --grader-soft: #3d2a17;
+    --human: #a7a9f0; --human-soft: #26284a; --fail: #f08a8a; color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.5;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 32px 64px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 36px; }
+  header { display: grid; gap: 10px; max-width: 70ch; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  h1 { font-family: var(--display); font-weight: 600; font-size: clamp(30px, 4.5vw, 44px); line-height: 1.05; margin: 0; text-wrap: balance; }
+  h2 { font-family: var(--display); font-weight: 600; font-size: 24px; margin: 0 0 12px; text-wrap: balance; }
+  .lede { font-size: 17px; max-width: 62ch; margin: 0; }
+  .lede strong { color: var(--grader); }
+  p { margin: 0; }
+
+  figure { margin: 0; display: grid; gap: 12px; }
+  .scroller { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  svg { display: block; width: 100%; min-width: 760px; height: auto; color: var(--fg); font-family: var(--body); }
+  svg .t { font-size: 13px; fill: var(--fg); }
+  svg .name { font-family: var(--display); font-weight: 600; font-size: 16px; fill: var(--fg); }
+  svg .sub { font-size: 11.5px; fill: var(--muted); }
+  svg .lbl { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+  svg .lane { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; fill: var(--muted); }
+  svg .maker-box { fill: var(--maker-soft); stroke: var(--maker); stroke-width: 1.5; }
+  svg .grader-box { fill: var(--grader-soft); stroke: var(--grader); stroke-width: 1.5; }
+  svg .human-box { fill: var(--human-soft); stroke: var(--human); stroke-width: 1.5; }
+  svg .orch { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 2 4; }
+  svg .flow { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  svg .grade { stroke: var(--grader); stroke-width: 2.2; fill: none; }
+  svg .grade-lbl { font-family: var(--mono); font-size: 11px; font-weight: 500; fill: var(--grader); }
+  svg .fail { stroke: var(--fail); stroke-width: 1.3; fill: none; stroke-dasharray: 5 4; }
+  svg .fail-lbl { font-family: var(--mono); font-size: 10.5px; fill: var(--fail); }
+  figcaption { color: var(--muted); font-size: 14px; max-width: 80ch; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .sw { width: 26px; height: 0; border-top: 2px solid var(--fg); }
+  .sw.g { border-top: 2.5px solid var(--grader); }
+  .sw.f { border-top: 1.5px dashed var(--fail); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-left-width: 4px; border-radius: 4px; padding: 16px 18px; display: grid; gap: 8px; min-width: 0; }
+  .card.maker { border-left-color: var(--maker); }
+  .card.grader { border-left-color: var(--grader); }
+  .card.human { border-left-color: var(--human); }
+  .card.orch { border-left-color: var(--line); }
+  .card h3 { font-family: var(--display); font-weight: 600; font-size: 19px; margin: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .tier { font-family: var(--mono); font-size: 11px; letter-spacing: .05em; color: var(--muted); font-weight: 400; }
+  .card p { font-size: 14.5px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+  dt { font-family: var(--mono); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); padding-top: 2px; }
+  dd { margin: 0; }
+  dd.by { color: var(--grader); font-weight: 500; }
+  dd.by.h { color: var(--human); }
+
+  .matrix { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; background: var(--surface); border: 1px solid var(--line); font-size: 14px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  td.by { color: var(--grader); font-weight: 500; }
+  td.by.h { color: var(--human); }
+  .note { color: var(--muted); font-size: 13.5px; max-width: 80ch; }
+</style>
+<style>html,body{margin:0}img{max-width:100%}</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Diana web scanner · autonomous improvement loop</div>
+    <h1>No agent grades its own work</h1>
+    <p class="lede">Eight agents turn a missed vulnerability into a merged scanner fix. Every agent that <em>makes</em> something hands it to a <strong>different</strong> agent to grade, and the last grader is a person.</p>
+  </header>
+
+  <figure>
+    <div class="scroller">
+      <svg viewBox="0 0 1060 560" role="img" aria-label="Four maker agents on the top row each hand their output down to a different grader agent on the bottom row; graders pass verdicts right to the Review Agent, which hands a merge recommendation to a human. Dashed arrows show failed grades sent back to the maker for rework.">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+          <marker id="arr-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--grader)"/>
+          </marker>
+          <marker id="arr-f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--fail)"/>
+          </marker>
+        </defs>
+
+        <!-- Orchestrator envelope -->
+        <rect class="orch" x="30" y="22" width="1000" height="518" rx="8"/>
+        <text class="lbl" x="48" y="44">ORCHESTRATOR · sequences the gates, enforces retry limits, decides nothing about code or merge</text>
+
+        <!-- Lane labels -->
+        <text class="lane" x="55" y="92">MAKERS · produce an artifact</text>
+        <text class="lane" x="55" y="366">GRADERS · judge someone else's artifact</text>
+
+        <!-- Maker boxes: y 104..172 -->
+        <g>
+          <rect class="maker-box" x="55" y="104" width="190" height="68" rx="4"/>
+          <text class="name" x="150" y="132" text-anchor="middle">Improvement Agent</text>
+          <text class="sub" x="150" y="152" text-anchor="middle">writes one generic scanner fix</text>
+        </g>
+        <g>
+          <rect class="maker-box" x="305" y="104" width="190" height="68" rx="4"/>
+          <text class="name" x="400" y="132" text-anchor="middle">Test Author</text>
+          <text class="sub" x="400" y="152" text-anchor="middle">writes synthetic unit tests</text>
+        </g>
+        <g>
+          <rect class="maker-box" x="555" y="104" width="190" height="68" rx="4"/>
+          <text class="name" x="650" y="132" text-anchor="middle">Validation Agent</text>
+          <text class="sub" x="650" y="152" text-anchor="middle">full scan on AWS · gap analysis</text>
+        </g>
+        <g>
+          <rect class="maker-box" x="805" y="104" width="190" height="68" rx="4"/>
+          <text class="name" x="900" y="132" text-anchor="middle">Tiny-Loop Agent</text>
+          <text class="sub" x="900" y="152" text-anchor="middle">cached crawl · one module · minutes</text>
+        </g>
+
+        <!-- Grader boxes: y 378..446 -->
+        <g>
+          <rect class="grader-box" x="55" y="378" width="190" height="68" rx="4"/>
+          <text class="name" x="150" y="406" text-anchor="middle">Generality Agent</text>
+          <text class="sub" x="150" y="426" text-anchor="middle">grades the diff · PASS / WARN / FAIL</text>
+        </g>
+        <g>
+          <rect class="grader-box" x="305" y="378" width="190" height="68" rx="4"/>
+          <text class="name" x="400" y="406" text-anchor="middle">Test Critic</text>
+          <text class="sub" x="400" y="426" text-anchor="middle">grades the tests · PASS / FAIL</text>
+        </g>
+        <g>
+          <rect class="grader-box" x="555" y="378" width="190" height="68" rx="4"/>
+          <text class="name" x="650" y="406" text-anchor="middle">Review Agent</text>
+          <text class="sub" x="650" y="426" text-anchor="middle">grades every verdict · merge or reject</text>
+        </g>
+        <g>
+          <rect class="human-box" x="805" y="378" width="190" height="68" rx="4"/>
+          <text class="name" x="900" y="406" text-anchor="middle">Human</text>
+          <text class="sub" x="900" y="426" text-anchor="middle">grades the Review Agent · confirms merge</text>
+        </g>
+
+        <!-- Top lane flow: Improvement -> Test Author -->
+        <line class="flow" x1="245" y1="138" x2="303" y2="138" marker-end="url(#arr)"/>
+        <text class="lbl" x="274" y="128" text-anchor="middle">branch</text>
+        <!-- Tiny-loop -> Validation: graduates -->
+        <line class="flow" x1="805" y1="138" x2="747" y2="138" marker-end="url(#arr)"/>
+        <text class="lbl" x="776" y="128" text-anchor="middle">graduates</text>
+
+        <!-- Grade arrows (down) -->
+        <line class="grade" x1="135" y1="172" x2="135" y2="376" marker-end="url(#arr-g)"/>
+        <text class="grade-lbl" x="126" y="280" text-anchor="end">graded by</text>
+        <text class="lbl" x="126" y="295" text-anchor="end">diff vs main</text>
+
+        <line class="grade" x1="385" y1="172" x2="385" y2="376" marker-end="url(#arr-g)"/>
+        <text class="grade-lbl" x="376" y="280" text-anchor="end">graded by</text>
+        <text class="lbl" x="376" y="295" text-anchor="end">tests on branch</text>
+
+        <line class="grade" x1="650" y1="172" x2="650" y2="376" marker-end="url(#arr-g)"/>
+        <text class="grade-lbl" x="641" y="265" text-anchor="end">graded by</text>
+        <text class="lbl" x="641" y="280" text-anchor="end">results.json</text>
+        <text class="lbl" x="641" y="295" text-anchor="end">vs baseline</text>
+
+        <!-- Tiny-loop: measurement only, no gate -->
+        <line class="grade" x1="900" y1="172" x2="900" y2="236" stroke-dasharray="3 4"/>
+        <text class="lbl" x="900" y="256" text-anchor="middle">measurement only, never a gate:</text>
+        <text class="lbl" x="900" y="271" text-anchor="middle">its fix still clears Generality</text>
+        <text class="lbl" x="900" y="286" text-anchor="middle">and a full Validation scan</text>
+
+        <!-- Fail arrows (up, dashed) -->
+        <line class="fail" x1="165" y1="376" x2="165" y2="174" marker-end="url(#arr-f)"/>
+        <text class="fail-lbl" x="174" y="280">FAIL · rework ≤3×</text>
+
+        <line class="fail" x1="415" y1="376" x2="415" y2="174" marker-end="url(#arr-f)"/>
+        <text class="fail-lbl" x="424" y="280">FAIL · rework ≤2×</text>
+
+        <!-- Review ANY FAIL -> Improvement: routed through the gap between lanes -->
+        <path class="fail" d="M 600 378 L 600 330 L 210 330 L 210 174" marker-end="url(#arr-f)"/>
+        <text class="fail-lbl" x="470" y="322" text-anchor="middle">ANY FAIL · rework ≤2×</text>
+
+        <!-- Bottom lane: verdicts flow right into Review -->
+        <line class="flow" x1="245" y1="412" x2="303" y2="412" marker-end="url(#arr)"/>
+        <text class="lbl" x="274" y="402" text-anchor="middle">verdict</text>
+        <line class="flow" x1="495" y1="412" x2="553" y2="412" marker-end="url(#arr)"/>
+        <text class="lbl" x="524" y="402" text-anchor="middle">verdicts</text>
+
+        <!-- Review -> Human -->
+        <line class="grade" x1="745" y1="412" x2="803" y2="412" marker-end="url(#arr-g)"/>
+        <text class="grade-lbl" x="774" y="400" text-anchor="middle">graded by</text>
+        <text class="lbl" x="774" y="470" text-anchor="middle">recommendation</text>
+        <text class="lbl" x="774" y="485" text-anchor="middle">+ chronicle entry</text>
+
+        <!-- Local pytest note under Test Critic -> Review -->
+        <text class="lbl" x="400" y="470" text-anchor="middle">pytest runs locally;</text>
+        <text class="lbl" x="400" y="485" text-anchor="middle">Review reads the result</text>
+
+        <!-- Footer line -->
+        <text class="lbl" x="48" y="522">Order of gates: Validation baseline → Improvement → Generality → Test Author → Test Critic → Validation → Review → Human</text>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i class="sw g"></i> graded by (always a different agent)</span>
+      <span><i class="sw"></i> hand-off</span>
+      <span><i class="sw f"></i> failed grade, sent back for rework</span>
+    </div>
+    <figcaption>Every downward arrow lands on a different box than it left. The Improvement Agent never runs a scan or a test. The Test Author never judges its own tests. The Review Agent weighs every verdict but does not write code, and cannot merge without a person. The dotted envelope is the Orchestrator, which only sequences the steps.</figcaption>
+  </figure>
+
+  <section>
+    <h2>What each agent is responsible for</h2>
+    <div class="cards">
+      <article class="card orch">
+        <h3>Orchestrator <span class="tier">opus · local</span></h3>
+        <p>Runs the seven-step loop in order and refuses to skip a gate. Counts retries, escalates to the user after the limit, and reads the chronicle to detect stalls. It makes no implementation choices and no merge decision.</p>
+        <dl><dt>Makes</dt><dd>Ordering only</dd><dt>Graded by</dt><dd>Nothing to grade</dd></dl>
+      </article>
+      <article class="card maker">
+        <h3>Improvement Agent <span class="tier">opus · local</span></h3>
+        <p>Reads the gap analysis, picks the single highest-impact fix that would help scan any web app, and implements it on a feature branch. One change per iteration, no target-specific code. It only writes code and never runs scans or tests.</p>
+        <dl><dt>Makes</dt><dd>Code diff on a branch</dd><dt>Graded by</dt><dd class="by">Generality, Test Critic, Validation, Review</dd></dl>
+      </article>
+      <article class="card grader">
+        <h3>Generality Agent <span class="tier">sonnet · local</span></h3>
+        <p>Reads every changed line against main. Hard-fails on target names, challenge-aware code, hardcoded responses, or credentials. Warns on stack-specific detection or path assumptions. Its test: would this also help scan a Django, Spring, or Rails app?</p>
+        <dl><dt>Makes</dt><dd>PASS / WARN / FAIL verdict</dd><dt>Graded by</dt><dd class="by">Review Agent checks it was thorough</dd></dl>
+      </article>
+      <article class="card maker">
+        <h3>Test Author <span class="tier">sonnet · local</span></h3>
+        <p>Writes unit tests for the branch from synthetic HTTP responses and neutral URLs. Every happy-path test gets a negative-path twin. No live targets, no captured responses, no sleeps or network.</p>
+        <dl><dt>Makes</dt><dd>Tests under tests/</dd><dt>Graded by</dt><dd class="by">Test Critic</dd></dl>
+      </article>
+      <article class="card grader">
+        <h3>Test Critic <span class="tier">sonnet · local</span></h3>
+        <p>Reads the tests and the code they cover. Asks five questions of each test: correct, complete, independent, generic, isolated. The mutation check is the heart of it: if the feature were deleted, would this test fail? A vacuous test is worse than none.</p>
+        <dl><dt>Makes</dt><dd>PASS / FAIL verdict</dd><dt>Graded by</dt><dd class="by">Review Agent checks it was thorough</dd></dl>
+      </article>
+      <article class="card maker">
+        <h3>Validation Agent <span class="tier">haiku · AWS ECS</span></h3>
+        <p>Builds a Diana image from the branch, runs a fresh full-crawl scan on ECS, fetches the results from S3, and writes the gap analysis. The source of ground truth: solve count, delta against baseline, regressions, and scan duration.</p>
+        <dl><dt>Makes</dt><dd>results.json + gap analysis</dd><dt>Graded by</dt><dd class="by">Review Agent compares to baseline</dd></dl>
+      </article>
+      <article class="card maker">
+        <h3>Tiny-Loop Agent <span class="tier">haiku · AWS sandbox</span></h3>
+        <p>The fast inner loop for a single scanner module. Reuses a cached sitemap, runs only the changed module, and reports which target challenges flipped. Refuses to run if the diff touches the crawler or models. It measures; it never gates a merge.</p>
+        <dl><dt>Makes</dt><dd>Scoreboard delta for one module</dd><dt>Graded by</dt><dd class="by">Generality + full Validation before merge</dd></dl>
+      </article>
+      <article class="card grader">
+        <h3>Review Agent <span class="tier">sonnet · local</span></h3>
+        <p>Gathers every result for the run and scores five criteria: solve rate up, no test regressions, performance within threshold, generality not FAIL, tests sound. All pass means recommend merge. Writes the chronicle entry, the project's memory across iterations.</p>
+        <dl><dt>Makes</dt><dd>Merge recommendation + chronicle</dd><dt>Graded by</dt><dd class="by h">Human</dd></dl>
+      </article>
+      <article class="card human">
+        <h3>Human <span class="tier">you</span></h3>
+        <p>The only reviewer of the only agent whose output needs a person. Reads the Review Agent's recommendation and confirms or declines the merge. No merge happens without this step.</p>
+        <dl><dt>Makes</dt><dd>Merge decision</dd><dt>Graded by</dt><dd>Production</dd></dl>
+      </article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Who grades whom</h2>
+    <div class="matrix">
+      <table>
+        <thead><tr><th>Maker</th><th>Produces</th><th>Graded by</th></tr></thead>
+        <tbody>
+          <tr><td>Improvement Agent</td><td>Code diff</td><td class="by">Generality Agent, Test Critic (through the Test Author's tests), Validation Agent, Review Agent</td></tr>
+          <tr><td>Test Author</td><td>Tests</td><td class="by">Test Critic</td></tr>
+          <tr><td>Generality Agent</td><td>Verdict on code</td><td class="by">Review Agent</td></tr>
+          <tr><td>Test Critic</td><td>Verdict on tests</td><td class="by">Review Agent</td></tr>
+          <tr><td>Validation Agent</td><td>Scan results, gap analysis</td><td class="by">Review Agent</td></tr>
+          <tr><td>Tiny-Loop Agent</td><td>Module scoreboard</td><td class="by">Measurement only; Generality and full Validation before merge</td></tr>
+          <tr><td>Review Agent</td><td>Merge recommendation</td><td class="by h">Human</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note" style="margin-top:12px">Source: the agent and skill definitions under <code>.claude/</code> and <code>docs/AGENT_LOOPS.md</code> in the Diana-Web-Scanner repo. The earlier team plan listed separate Test Runner and Benchmark agents; in the current definitions the unit tests run locally and the Review Agent reads scan duration from the Validation results.</p>
+  </section>
+</div>
+</body>
+</html>
