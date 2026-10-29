@@ -312,6 +312,34 @@
     </div>
     <p class="note" style="margin-top:12px">Source: the agent and skill definitions under <code>.claude/</code> and <code>docs/AGENT_LOOPS.md</code> in the Diana-Web-Scanner repo. The earlier team plan listed separate Test Runner and Benchmark agents; in the current definitions the unit tests run locally and the Review Agent reads scan duration from the Validation results.</p>
   </section>
+
+  <section>
+    <h2>How runs remember each other</h2>
+    <p class="note" style="margin-bottom:12px">Agents share no conversation. Each run is tied together by one run id, and what one run learns reaches the next through four documents.</p>
+    <div class="cards">
+      <article class="card grader">
+        <h3>docs/CHRONICLE.md <span class="tier">git · narrative</span></h3>
+        <p>One entry per iteration: solve rate before and after, duration, tests, cost, and a short synopsis of what changed and why it passed or failed. The Review Agent appends it. The Orchestrator reads it first to detect stalls, and the Improvement Agent reads it so a rejected approach is not tried again.</p>
+        <dl><dt>Written by</dt><dd>Review Agent</dd><dt>Read by</dt><dd>Orchestrator, Improvement Agent, people</dd></dl>
+      </article>
+      <article class="card grader">
+        <h3>chronicle/&lt;run-id&gt;.json <span class="tier">S3 · structured</span></h3>
+        <p>The same iteration as machine-readable fields: detection, performance, tests, cost, every agent's verdict, and the next opportunities. Cumulative cost is carried forward by summing earlier entries. Prepared locally under agent-results, then uploaded to the artifacts bucket.</p>
+        <dl><dt>Written by</dt><dd>Review Agent</dd><dt>Read by</dt><dd>Review Agent on later runs</dd></dl>
+      </article>
+      <article class="card maker">
+        <h3>&lt;run-id&gt;/validation/results.json <span class="tier">S3 · scan output</span></h3>
+        <p>Raw output of the full scan on ECS: findings, challenge solve count, token usage, scan duration. The most recent run is the baseline the next run is measured against. Fetched locally with the fetch-agent-results script; the local folder is gitignored.</p>
+        <dl><dt>Written by</dt><dd>Validation Agent</dd><dt>Read by</dt><dd>Validation Agent (baseline delta), Review Agent</dd></dl>
+      </article>
+      <article class="card maker">
+        <h3>&lt;run-id&gt;/validation/gap-analysis.md <span class="tier">local · derived</span></h3>
+        <p>What the scan missed and why, ranked into improvement opportunities. Derived from results.json and the comparison to the previous run. It is the hand-off that starts the next iteration: the Improvement Agent picks its one fix from this list.</p>
+        <dl><dt>Written by</dt><dd>Validation Agent</dd><dt>Read by</dt><dd>Improvement Agent, Review Agent</dd></dl>
+      </article>
+    </div>
+    <p class="note" style="margin-top:12px">The tiny loop keeps one more cache: the seed crawl's sitemap in S3, reused by every short-loop run so a module fix can be measured in minutes. It is a speed cache, not history, and a diff that touches the crawler invalidates it.</p>
+  </section>
 </div>
 </body>
 </html>
